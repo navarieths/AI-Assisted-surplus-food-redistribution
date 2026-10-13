@@ -50,6 +50,25 @@ export const config = {
     weights: { ...DEFAULT_MATCH_WEIGHTS, ...(parseWeights(process.env.MATCH_WEIGHTS) || {}) },
   },
 
+  // Volunteer assignment: how many ranked volunteers are invited at once and how
+  // long each invitation stays open before it cascades to the next volunteer.
+  volunteerOffer: {
+    timeoutSec: Number(process.env.VOLUNTEER_OFFER_TIMEOUT_SEC || 600),
+    limit: Number(process.env.VOLUNTEER_OFFER_LIMIT || 3),
+    weights: {
+      travelTime: 50,
+      availability: 30,
+      feasibility: 20,
+      ...(parseWeights(process.env.VOLUNTEER_WEIGHTS) || {}),
+    },
+  },
+
+  // Pickup OTP policy: OTPs are stored hashed and verification attempts capped.
+  otp: {
+    maxAttempts: Number(process.env.OTP_MAX_ATTEMPTS || 5),
+    hashRounds: Number(process.env.OTP_HASH_ROUNDS || 8),
+  },
+
   geo: {
     nominatimBase: process.env.NOMINATIM_BASE || 'https://nominatim.openstreetmap.org',
     osrmBase: process.env.OSRM_BASE || 'https://router.project-osrm.org',

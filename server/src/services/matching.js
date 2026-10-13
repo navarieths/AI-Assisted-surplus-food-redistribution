@@ -351,24 +351,32 @@ export async function scoreListing(listing) {
     volunteerTravelMin = vr.durationMin;
   }
 
-  const { scored, filtered, considered } = await rankCandidates({
+  const { scored, ranked, filtered, considered } = await rankCandidates({
     listing,
     candidates,
     volunteerTravelMin,
   });
 
-  return { scored, filtered, considered, volunteer, volunteerTravelMin };
+  return { scored, ranked, filtered, considered, volunteer, volunteerTravelMin };
 }
 
 /* ------------------------------- persistence ----------------------------- */
 
-/** Persist offers for a listing, returning the stored rows (ranked). */
+/**
+ * Persist the ranked match queue for a listing, returning the stored rows.
+ *
+ * The top `config.matching.offerLimit` recipients are offered immediately; the
+ * remainder are stored as `CANDIDATE` so a decline can cascade to the next
+ * ranked recipient. Existing rows keep their status (offered/accepted/declined)
+ * and are only refreshed with the latest score/breakdown.
+ */
 export async function persistOffers(listing) {
-  const { scored } = await scoreListing(listing);
+  const { ranked } = await scoreListing(listing);
   const existing = q.all(`SELECT recipient_id FROM offers WHERE listing_id = ?`, [listing.id]);
   const seen = new Set(existing.map((e) => e.recipient_id));
+  const offerLimit = config.matching.offerLimit;
 
-  scored.forEach((s, idx) => {
+  ranked.forEach((s, idx) => {
     const explanation = s.explanation;
     if (seen.has(s.recipient.id)) {
       q.run(
@@ -387,10 +395,11 @@ export async function persistOffers(listing) {
         ]
       );
     } else {
+      const status = idx < offerLimit ? 'OFFERED' : 'CANDIDATE';
       q.run(
         `INSERT INTO offers (listing_id, recipient_id, score, breakdown_json, explanation,
           distance_km, duration_min, estimated, rank, status)
-         VALUES (?,?,?,?,?,?,?,?,?, 'CANDIDATE')`,
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
         [
           listing.id,
           s.recipient.id,
@@ -401,6 +410,7 @@ export async function persistOffers(listing) {
           s.route.durationMin,
           s.route.estimated ? 1 : 0,
           idx + 1,
+          status,
         ]
       );
     }

@@ -3,13 +3,12 @@ import { q } from '../db.js';
 import { authRequired, requireRole } from '../auth.js';
 import {
   acceptOffer,
+  cascadeOffers,
   declineOffer,
-  offerNext,
   serializeAssignment,
   serializeListing,
 } from '../services/listings.js';
 import { maybeEnhanceExplanation } from '../services/matching.js';
-import { transition } from '../services/workflow.js';
 import { withProfile } from '../services/profiles.js';
 
 const router = Router();
@@ -49,32 +48,19 @@ router.post('/:id/decline', requireRole('recipient'), async (req, res, next) => 
   try {
     const offer = q.get(`SELECT * FROM offers WHERE id = ?`, [req.params.id]);
     if (!offer) return res.status(404).json({ error: 'Offer not found' });
-    declineOffer(offer, req.user, req.user);
-    const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [offer.listing_id]);
-    const nextOffer = await maybeNextOffer(listing, req.user);
-    res.json({ declined: Number(req.params.id), nextOffered: nextOffer ? nextOffer.id : null });
+    const { listing } = declineOffer(offer, req.user, req.user);
+    const { nextOffer, noMatch } = await cascadeOffers(listing, req.user);
+    const current = q.get(`SELECT status FROM listings WHERE id = ?`, [listing.id]);
+    res.json({
+      declined: Number(req.params.id),
+      nextOffered: nextOffer ? nextOffer.id : null,
+      noMatch,
+      listingStatus: current.status,
+    });
   } catch (err) {
     next(err);
   }
 });
-
-async function maybeNextOffer(listing, actor) {
-  if (['DELIVERED', 'EXPIRED', 'ACCEPTED'].includes(listing.status)) return null;
-  const offered = q.get(
-    `SELECT COUNT(*) AS n FROM offers WHERE listing_id = ? AND status = 'OFFERED'`,
-    [listing.id]
-  );
-  if (offered.n > 0) return null; // other recipients still have live offers
-  const next = await offerNext(listing, actor);
-  if (!next) {
-    try {
-      transition(listing.id, 'NO_MATCH', actor, 'All offers declined');
-    } catch {
-      /* already in a side/terminal state */
-    }
-  }
-  return next;
-}
 
 /** Optional: ask the LLM to rewrite the explanation (never the score). */
 router.post('/:id/explain', async (req, res, next) => {

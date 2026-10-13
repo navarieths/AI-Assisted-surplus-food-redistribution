@@ -83,8 +83,9 @@ router.get('/:id', (req, res) => {
       `SELECT m.*, u.name AS recipient_name, r.org_name, r.veg_only, r.capacity_servings
        FROM offers m JOIN users u ON u.id = m.recipient_id
        LEFT JOIN recipients r ON r.user_id = m.recipient_id
-       WHERE m.listing_id = ? ORDER BY m.rank`,
-      [listing.id]
+       WHERE m.listing_id = ? AND (m.rank <= ? OR m.status != 'CANDIDATE')
+       ORDER BY m.rank`,
+      [listing.id, config.matching.resultLimit]
     );
   } else if (req.user.role === 'recipient') {
     offers = q.all(`SELECT * FROM offers WHERE listing_id = ? AND recipient_id = ?`, [
@@ -214,8 +215,9 @@ router.get('/:id/offers', requireRole('provider'), (req, res) => {
     `SELECT m.*, u.name AS recipient_name, r.org_name FROM offers m
      JOIN users u ON u.id = m.recipient_id
      LEFT JOIN recipients r ON r.user_id = m.recipient_id
-     WHERE m.listing_id = ? ORDER BY m.rank`,
-    [listing.id]
+     WHERE m.listing_id = ? AND (m.rank <= ? OR m.status != 'CANDIDATE')
+     ORDER BY m.rank`,
+    [listing.id, config.matching.resultLimit]
   );
   res.json({
     offers: offers.map((m) => ({

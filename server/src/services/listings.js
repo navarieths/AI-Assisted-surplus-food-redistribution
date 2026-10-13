@@ -121,11 +121,13 @@ export function applyValidation(listing, actor) {
 
 export async function refreshMatching(listing, actor) {
   const stored = await persistOffers(listing);
-  const top = stored.slice(0, config.matching.offerLimit);
-  for (const m of top) {
-    if (m.status === 'CANDIDATE') {
-      q.run(`UPDATE offers SET status = 'OFFERED', updated_at = datetime('now') WHERE id = ?`, [m.id]);
-    }
+  // persistOffers already offers the top `offerLimit`; top up if some were
+  // previously declined so the offer pool is full before notifying.
+  let liveOffers = stored.filter((o) => o.status === 'OFFERED');
+  while (liveOffers.length < config.matching.offerLimit) {
+    const promoted = promoteNextCandidate(listing);
+    if (!promoted) break;
+    liveOffers.push(promoted);
   }
   const offered = q.all(
     `SELECT * FROM offers WHERE listing_id = ? AND status = 'OFFERED' ORDER BY rank`,
@@ -152,13 +154,20 @@ export async function refreshMatching(listing, actor) {
   return q.all(`SELECT * FROM offers WHERE listing_id = ? ORDER BY rank`, [listing.id]);
 }
 
-export async function offerNext(listing, actor) {
+/** Move the highest-ranked CANDIDATE to OFFERED. Returns it, or null if none. */
+function promoteNextCandidate(listing) {
   const next = q.get(
     `SELECT * FROM offers WHERE listing_id = ? AND status = 'CANDIDATE' ORDER BY rank LIMIT 1`,
     [listing.id]
   );
   if (!next) return null;
   q.run(`UPDATE offers SET status = 'OFFERED', updated_at = datetime('now') WHERE id = ?`, [next.id]);
+  return { ...next, status: 'OFFERED' };
+}
+
+export async function offerNext(listing, actor) {
+  const next = promoteNextCandidate(listing);
+  if (!next) return null;
   if (listing.status !== 'OFFERED') transition(listing.id, 'OFFERED', actor, 'Offered next candidate');
   notify(
     next.recipient_id,
@@ -168,6 +177,33 @@ export async function offerNext(listing, actor) {
     listing.id
   );
   return next;
+}
+
+/**
+ * After a decline: offer the next ranked candidate immediately. When no
+ * candidates remain and no other offers are live, the listing has no match.
+ */
+export async function cascadeOffers(listing, actor) {
+  if (['ACCEPTED', 'DELIVERED', 'EXPIRED'].includes(listing.status)) {
+    return { nextOffer: null, noMatch: false };
+  }
+  const next = await offerNext(listing, actor);
+  if (next) return { nextOffer: next, noMatch: false };
+
+  const live = q.get(
+    `SELECT COUNT(*) AS n FROM offers WHERE listing_id = ? AND status = 'OFFERED'`,
+    [listing.id]
+  ).n;
+  const current = q.get(`SELECT status FROM listings WHERE id = ?`, [listing.id]);
+  if (live === 0 && current.status !== 'NO_MATCH') {
+    try {
+      transition(listing.id, 'NO_MATCH', actor, 'All recipients declined');
+      return { nextOffer: null, noMatch: true };
+    } catch {
+      /* already terminal */
+    }
+  }
+  return { nextOffer: null, noMatch: false };
 }
 
 /* --------------------------- accept / decline ---------------------------- */
@@ -184,10 +220,15 @@ export function acceptOffer(offer, recipient, actor) {
     throw err;
   }
   const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [offer.listing_id]);
+  if (!listing || !['OFFERED', 'AT_RISK'].includes(listing.status)) {
+    const err = new Error(`Listing is ${listing?.status || 'missing'}, cannot accept this offer`);
+    err.status = 409;
+    throw err;
+  }
   q.run(`UPDATE offers SET status = 'ACCEPTED', updated_at = datetime('now') WHERE id = ?`, [
     offer.id,
   ]);
-  // Supersede other open offers for the same listing.
+  // Supersede other open offers and queued candidates for the same listing.
   q.run(
     `UPDATE offers SET status = 'DECLINED', updated_at = datetime('now')
      WHERE listing_id = ? AND id != ? AND status IN ('OFFERED','CANDIDATE')`,
@@ -213,13 +254,18 @@ export function declineOffer(offer, recipient, actor) {
     err.status = 403;
     throw err;
   }
+  if (offer.status !== 'OFFERED') {
+    const err = new Error(`Offer is ${offer.status}, cannot decline`);
+    err.status = 409;
+    throw err;
+  }
   q.run(`UPDATE offers SET status = 'DECLINED', updated_at = datetime('now') WHERE id = ?`, [
     offer.id,
   ]);
   const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [offer.listing_id]);
   notify(listing.provider_id, 'provider', `Donation #${listing.id} declined`, `${recipient.name} declined.`, listing.id);
   void actor;
-  return q.get(`SELECT * FROM offers WHERE id = ?`, [offer.id]);
+  return { offer: q.get(`SELECT * FROM offers WHERE id = ?`, [offer.id]), listing };
 }
 
 /* ------------------------------ assignment ------------------------------- */

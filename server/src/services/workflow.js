@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import bcrypt from 'bcryptjs';
+import { config } from '../config.js';
 import { q } from '../db.js';
 
 /**
@@ -80,4 +82,22 @@ export function notify(userId, role, subject, body, listingId = null) {
 
 export function generateOtp() {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+}
+
+/**
+ * Pickup OTPs are never stored in clear text. The provider is the only party
+ * who sees the plain value (delivered through the simulated notification
+ * channel); the database stores a bcrypt hash used for verification.
+ */
+export function hashOtp(otp) {
+  return bcrypt.hashSync(String(otp), config.otp.hashRounds);
+}
+
+export function verifyOtp(otp, hash) {
+  if (!hash) return false;
+  try {
+    return bcrypt.compareSync(String(otp), String(hash));
+  } catch {
+    return false;
+  }
 }

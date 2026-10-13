@@ -257,10 +257,12 @@ async function main() {
     const res = validateListing(l3);
     addValidation(l3, res);
     logEvent(l3.id, 'LISTED', 'ELIGIBLE', { id: U('nandini@demo.test'), role: 'provider' }, res.summary);
-    setListingStatus(l3.id, 'ELIGIBLE', 'OFFERED', 'Offered to top 3 matches');
+    setListingStatus(l3.id, 'ELIGIBLE', 'OFFERED', 'Offered to top 3 matches (1 queued)');
     addOffer(l3, user('hope@demo.test'), 'OFFERED', 1);
     addOffer(l3, user('seva@demo.test'), 'OFFERED', 2);
     addOffer(l3, user('littledrops@demo.test'), 'OFFERED', 3);
+    // Queued candidate: if an offered recipient declines, this one is offered next.
+    addOffer(l3, user('asha@demo.test'), 'CANDIDATE', 4);
     notify(U('hope@demo.test'), 'recipient', 'New surplus match', 'Assorted Pastries — accept in your inbox.', l3.id);
     notify(U('littledrops@demo.test'), 'recipient', 'New surplus match', 'Assorted Pastries — accept in your inbox.', l3.id);
   }

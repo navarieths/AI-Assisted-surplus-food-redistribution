@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS volunteers (
   address TEXT,
   lat REAL,
   lng REAL,
-  vehicle TEXT
+  vehicle TEXT,
+  available INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS delivery_partners (
@@ -149,12 +150,35 @@ CREATE TABLE IF NOT EXISTS assignments (
   volunteer_id INTEGER REFERENCES users(id),
   status TEXT NOT NULL DEFAULT 'CREATED',
   pickup_otp TEXT,
+  pickup_otp_hash TEXT,
+  pickup_otp_attempts INTEGER NOT NULL DEFAULT 0,
+  pickup_otp_locked INTEGER NOT NULL DEFAULT 0,
+  pickup_otp_issued_at TEXT,
   delivery_otp TEXT,
   pickup_verified_at TEXT,
   delivered_at TEXT,
   fallback INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS assignment_offers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+  volunteer_id INTEGER NOT NULL REFERENCES users(id),
+  rank INTEGER NOT NULL DEFAULT 0,
+  score REAL NOT NULL DEFAULT 0,
+  travel_min REAL,
+  distance_km REAL,
+  feasible INTEGER NOT NULL DEFAULT 1,
+  available INTEGER NOT NULL DEFAULT 1,
+  reasons_json TEXT,
+  status TEXT NOT NULL DEFAULT 'OFFERED'
+    CHECK (status IN ('OFFERED','ACCEPTED','DECLINED','EXPIRED')),
+  expires_at TEXT,
+  responded_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (assignment_id, volunteer_id)
 );
 
 CREATE TABLE IF NOT EXISTS volunteer_locations (
@@ -187,12 +211,15 @@ CREATE INDEX IF NOT EXISTS idx_assignments_volunteer ON assignments(volunteer_id
 CREATE INDEX IF NOT EXISTS idx_assignments_recipient ON assignments(recipient_id);
 CREATE INDEX IF NOT EXISTS idx_events_listing ON status_events(listing_id);
 CREATE INDEX IF NOT EXISTS idx_vloc_assignment ON volunteer_locations(assignment_id);
+CREATE INDEX IF NOT EXISTS idx_assignment_offers_assignment ON assignment_offers(assignment_id);
+CREATE INDEX IF NOT EXISTS idx_assignment_offers_volunteer ON assignment_offers(volunteer_id);
 `;
 
 const LEGACY_TABLES = [
   'volunteer_locations',
   'notifications',
   'status_events',
+  'assignment_offers',
   'assignments',
   'offers',
   'validation_results',
@@ -253,6 +280,13 @@ export function initSchema() {
   ensureColumns('recipients', [
     ['accepted_categories', 'TEXT'],
     ['demand', 'REAL NOT NULL DEFAULT 0.5'],
+  ]);
+  ensureColumns('volunteers', [['available', 'INTEGER NOT NULL DEFAULT 1']]);
+  ensureColumns('assignments', [
+    ['pickup_otp_hash', 'TEXT'],
+    ['pickup_otp_attempts', 'INTEGER NOT NULL DEFAULT 0'],
+    ['pickup_otp_locked', 'INTEGER NOT NULL DEFAULT 0'],
+    ['pickup_otp_issued_at', 'TEXT'],
   ]);
 }
 
