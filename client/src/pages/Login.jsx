@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Building2, HeartHandshake, LogIn, Truck, UserPlus } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
 import { api } from '../lib/api.js';
@@ -11,7 +11,8 @@ const ROLE_ICON = { provider: Building2, recipient: HeartHandshake, volunteer: T
 export default function Login() {
   const { login, register, user } = useAuth();
   const navigate = useNavigate();
-  const [mode, setMode] = useState('login');
+  const [params] = useSearchParams();
+  const [mode, setMode] = useState(params.get('mode') === 'register' ? 'register' : 'login');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [demoAccounts, setDemoAccounts] = useState([]);

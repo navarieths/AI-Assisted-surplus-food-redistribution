@@ -34,8 +34,10 @@ npm run seed         # creates the SQLite DB with demo data
 npm run dev          # starts API (:4000) and client (:5173)
 ```
 
-Then open http://localhost:5173 and log in with any demo account
-(password `password123`), or use the one-click demo buttons on the login screen.
+Then open http://localhost:5173 — you'll land on the public **landing page**.
+Use **Get started** to register (the address field uses the real map picker), or
+**Log in** with any demo account (password `password123`) / the one-click demo
+buttons on the login screen.
 
 ```bash
 npm test             # runs the backend unit tests (node:test)
@@ -59,7 +61,7 @@ npm run build        # production build of the client
    Validation runs on save → `ELIGIBLE` or `FLAGGED` (unsafe details blocked).
 2. Eligible listings are **matched**: Haversine pre-filter → real OSRM road
    distance for the top 10 → deterministic 0–100 score. Top candidates get offers.
-3. **Recipient** accepts an offer → listing `ACCEPTED`, a task is created.
+3. **Recipient** accepts an offer → listing `ACCEPTED`, an **assignment** is created.
 4. A **volunteer** claims the task (or the provider assigns one / triggers the
    fallback carrier) → `VOLUNTEER_ASSIGNED`.
 5. Volunteer enters the **pickup OTP** → `PICKED_UP` → `IN_TRANSIT`, and the app
@@ -85,6 +87,44 @@ Extra **historical delivered** donations are also seeded so the impact
 dashboard and heat/cluster map have meaningful data.
 
 Seed totals: **4 providers, 5 recipients, 4 volunteers, 3 delivery partners**.
+
+---
+
+## Database schema (SQLite)
+
+Normalised, one profile table per role (each keyed by `user_id`):
+
+| Table | Purpose |
+|-------|---------|
+| `users` | Identity + auth for every role (`role`, `name`, `email`, `phone`, `password_hash`) |
+| `providers` | Provider profile — `org_name`, `address`, `lat`, `lng` |
+| `recipients` | Recipient profile — `org_name`, coords, `capacity_servings`, `veg_only`, `collection_open/close`, `reliability` |
+| `volunteers` | Volunteer profile — `address`, coords, `vehicle` |
+| `delivery_partners` | Delivery-partner profile — `company_name`, coords, `vehicle` |
+| `listings` | Surplus food listings + workflow `status` |
+| `validation_results` | Rule-check history for a listing (`eligible`, `flags_json`, `disclaimer`, `checked_at`) |
+| `offers` | Deterministic matches offered to recipients (`score`, `breakdown_json`, `rank`, `status`) |
+| `assignments` | Pickup/delivery jobs (`offer_id`, recipient, volunteer, OTPs, timestamps) |
+| `status_events` | Every workflow transition with actor and reason |
+| `notifications` | Simulated notifications |
+| `volunteer_locations` | Live carrier breadcrumbs for tracking |
+
+Profile tables cascade from `users`. The demo DB is disposable: `server/src/db.js`
+detects the older de-normalised layout and recreates the tables — run
+`npm run seed` afterwards.
+
+### API endpoints
+
+| Area | Endpoints |
+|------|-----------|
+| Auth | `POST /auth/register`, `POST /auth/login`, `GET /auth/me`, `GET /auth/demo-accounts` |
+| Geo | `GET /geo/search`, `GET /geo/reverse`, `GET /geo/route` |
+| Listings | `GET/POST /listings`, `GET/PATCH /listings/:id`, `POST /listings/:id/{validate,match,expire,at-risk}`, `GET /listings/:id/offers` |
+| Offers | `GET /offers`, `POST /offers/:id/{accept,decline,explain}` |
+| Assignments | `GET /assignments`, `GET /assignments/available`, `GET /assignments/:id`, `POST /assignments/:id/{claim,assign,fallback,pickup,confirm-delivery}`, `GET /assignments/:id/track` |
+| Carriers | `GET /volunteers`, `POST /volunteers/location` |
+| Impact | `GET /impact` |
+| Notifications | `GET /notifications`, `POST /notifications/read-all` |
 
 ---
 
@@ -155,8 +195,9 @@ text, never the score. Without a key, a deterministic template is used.
   with a 4s timeout, an in-memory cache, and a **Haversine + 25 km/h fallback**
   flagged `estimated: true`.
 - **Volunteer live tracking**: the volunteer app posts to
-  `POST /volunteers/location` every **10s** while a task is active; recipient and
-  provider screens poll `/tasks/:id/track` every **5s** and move the marker.
+  `POST /volunteers/location` every **10s** while an assignment is active;
+  recipient and provider screens poll `/assignments/:id/track` every **5s** and
+  move the marker.
 - **Task map** shows the pickup marker (green), drop marker (navy), volunteer
   marker, the OSRM route polyline, remaining distance and ETA, plus an
   **Open in Google Maps** deep link.
@@ -193,20 +234,22 @@ server/
     db.js                 SQLite schema + helpers
     seed.js               Bengaluru seed data
     auth.js               JWT + role middleware
-    routes/               auth, geo, listings, matches, tasks, volunteers, impact, notifications
+    routes/               auth, geo, listings, offers, assignments, volunteers, impact, notifications
     services/
       geo.js              geocode / reverseGeocode / routeInfo (+ fallback)
       validate.js         rule-based listing validation
       matching.js         deterministic scoring (+ optional LLM rewrite)
       workflow.js         state machine, status_events, simulated notifications
-      listings.js         shared listing/task logic and serialisation
+      listings.js         shared listing/offer/assignment logic and serialisation
+      profiles.js         per-role profile lookups (users <-> profile tables)
       access.js           contact-visibility rules
   test/                   node:test unit tests
 client/
   src/
     components/           Layout, MapPicker, MapView, TaskMap, LocationSharer, ui
-    pages/                Login, ProviderDashboard, ListingForm/Detail, RecipientInbox/Tasks,
-                          VolunteerAvailable/Tasks, TaskDetail, Impact, Notifications, Carriers
+    pages/                Landing, Login, ProviderDashboard, ListingForm/Detail,
+                          RecipientInbox/Tasks, VolunteerAvailable/Tasks, TaskDetail,
+                          Impact, Notifications, Carriers
     lib/                  api, auth, format, mapConfig, leafletIcons
 ```
 

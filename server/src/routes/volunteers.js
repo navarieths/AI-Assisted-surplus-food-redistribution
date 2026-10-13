@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { q } from '../db.js';
 import { authRequired } from '../auth.js';
 import { haversineKm } from '../services/geo.js';
+import { activeCarriers, updateCarrierLocation } from '../services/profiles.js';
 
 const router = Router();
 router.use(authRequired);
@@ -13,10 +14,7 @@ router.get('/', (req, res) => {
   const lat = listing ? listing.lat : req.user.lat;
   const lng = listing ? listing.lng : req.user.lng;
 
-  let carriers = q.all(
-    `SELECT id, name, role, phone, email, org_name, lat, lng, address, active
-     FROM users WHERE role IN ('volunteer','delivery_partner') AND active = 1`
-  );
+  let carriers = activeCarriers();
   if (lat != null && lng != null) {
     carriers = carriers
       .map((c) => ({
@@ -29,34 +27,34 @@ router.get('/', (req, res) => {
 });
 
 /**
- * Volunteer live tracking: the app posts navigator.geolocation every 10s while a
- * task is active. Recipient/provider screens poll /tasks/:id/track every 5s.
+ * Volunteer live tracking: the app posts navigator.geolocation every 10s while an
+ * assignment is active. Recipient/provider screens poll /assignments/:id/track.
  */
 router.post('/location', (req, res) => {
   if (!['volunteer', 'delivery_partner'].includes(req.user.role)) {
     return res.status(403).json({ error: 'Only carriers post locations' });
   }
-  const { task_id, lat, lng } = req.body || {};
+  const { assignment_id, task_id, lat, lng } = req.body || {};
+  const assignmentId = assignment_id ?? task_id;
   const latitude = Number(lat);
   const longitude = Number(lng);
-  if (!task_id || !Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    return res.status(400).json({ error: 'task_id, lat and lng are required' });
+  if (!assignmentId || !Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return res.status(400).json({ error: 'assignment_id, lat and lng are required' });
   }
-  const task = q.get(`SELECT * FROM tasks WHERE id = ?`, [task_id]);
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  if (task.volunteer_id !== req.user.id) {
-    return res.status(403).json({ error: 'Not your task' });
+  const assignment = q.get(`SELECT * FROM assignments WHERE id = ?`, [assignmentId]);
+  if (!assignment) return res.status(404).json({ error: 'Assignment not found' });
+  if (assignment.volunteer_id !== req.user.id) {
+    return res.status(403).json({ error: 'Not your assignment' });
   }
-  q.run(`INSERT INTO volunteer_locations (task_id, volunteer_id, lat, lng) VALUES (?,?,?,?)`, [
-    task.id,
-    req.user.id,
-    latitude,
-    longitude,
-  ]);
-  q.run(`UPDATE users SET lat = ?, lng = ? WHERE id = ?`, [latitude, longitude, req.user.id]);
-  const latest = q.get(`SELECT * FROM volunteer_locations WHERE task_id = ? ORDER BY id DESC LIMIT 1`, [
-    task.id,
-  ]);
+  q.run(
+    `INSERT INTO volunteer_locations (assignment_id, volunteer_id, lat, lng) VALUES (?,?,?,?)`,
+    [assignment.id, req.user.id, latitude, longitude]
+  );
+  updateCarrierLocation(req.user.id, req.user.role, latitude, longitude);
+  const latest = q.get(
+    `SELECT * FROM volunteer_locations WHERE assignment_id = ? ORDER BY id DESC LIMIT 1`,
+    [assignment.id]
+  );
   res.json({ ok: true, recorded_at: latest.recorded_at });
 });
 

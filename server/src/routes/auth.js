@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { q } from '../db.js';
+import { db, q } from '../db.js';
 import {
   authRequired,
   hashPassword,
@@ -7,25 +7,42 @@ import {
   signToken,
   verifyPassword,
 } from '../auth.js';
+import { withProfile } from '../services/profiles.js';
 
 const router = Router();
 
 const ROLES = ['provider', 'recipient', 'volunteer', 'delivery_partner'];
 
+function insertProfile(role, userId, body) {
+  const { org_name, address, lat, lng, veg_only, capacity_servings, vehicle } = body || {};
+  if (role === 'provider') {
+    q.run(`INSERT INTO providers (user_id, org_name, address, lat, lng) VALUES (?,?,?,?,?)`, [
+      userId, org_name || null, address || null, lat ?? null, lng ?? null,
+    ]);
+  } else if (role === 'recipient') {
+    q.run(
+      `INSERT INTO recipients (user_id, org_name, address, lat, lng, capacity_servings, veg_only)
+       VALUES (?,?,?,?,?,?,?)`,
+      [
+        userId, org_name || null, address || null, lat ?? null, lng ?? null,
+        capacity_servings ? Number(capacity_servings) : 0, veg_only ? 1 : 0,
+      ]
+    );
+  } else if (role === 'volunteer') {
+    q.run(`INSERT INTO volunteers (user_id, address, lat, lng, vehicle) VALUES (?,?,?,?,?)`, [
+      userId, address || null, lat ?? null, lng ?? null, vehicle || null,
+    ]);
+  } else if (role === 'delivery_partner') {
+    q.run(
+      `INSERT INTO delivery_partners (user_id, company_name, address, lat, lng, vehicle)
+       VALUES (?,?,?,?,?,?)`,
+      [userId, org_name || null, address || null, lat ?? null, lng ?? null, vehicle || null]
+    );
+  }
+}
+
 router.post('/register', (req, res) => {
-  const {
-    role,
-    name,
-    email,
-    password,
-    phone,
-    org_name,
-    lat,
-    lng,
-    address,
-    veg_only,
-    capacity_servings,
-  } = req.body || {};
+  const { role, name, email, password, phone } = req.body || {};
 
   if (!ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
   if (!name || !email || !password) {
@@ -34,25 +51,18 @@ router.post('/register', (req, res) => {
   const exists = q.get(`SELECT id FROM users WHERE email = ?`, [email.toLowerCase()]);
   if (exists) return res.status(409).json({ error: 'Email already registered' });
 
-  const info = q.run(
-    `INSERT INTO users (role, name, email, phone, password_hash, org_name, lat, lng, address,
-      veg_only, capacity_servings, collection_open, collection_close)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,'08:00','22:00')`,
-    [
-      role,
-      name,
-      email.toLowerCase(),
-      phone || null,
-      hashPassword(password),
-      org_name || null,
-      lat ?? null,
-      lng ?? null,
-      address || null,
-      veg_only ? 1 : 0,
-      capacity_servings ? Number(capacity_servings) : 0,
-    ]
-  );
-  const user = q.get(`SELECT * FROM users WHERE id = ?`, [info.lastInsertRowid]);
+  const create = db.transaction(() => {
+    const info = q.run(
+      `INSERT INTO users (role, name, email, phone, password_hash) VALUES (?,?,?,?,?)`,
+      [role, name, email.toLowerCase(), phone || null, hashPassword(password)]
+    );
+    const userId = Number(info.lastInsertRowid);
+    insertProfile(role, userId, req.body);
+    return userId;
+  });
+
+  const userId = create();
+  const user = withProfile(q.get(`SELECT * FROM users WHERE id = ?`, [userId]));
   res.status(201).json({ token: signToken(user), user: publicUser(user) });
 });
 
@@ -63,7 +73,8 @@ router.post('/login', (req, res) => {
   if (!user || !verifyPassword(password, user.password_hash)) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
-  res.json({ token: signToken(user), user: publicUser(user) });
+  const full = withProfile(user);
+  res.json({ token: signToken(full), user: publicUser(full) });
 });
 
 router.get('/me', authRequired, (req, res) => {
@@ -73,7 +84,13 @@ router.get('/me', authRequired, (req, res) => {
 /** Convenience for the demo login screen (seeded accounts only). */
 router.get('/demo-accounts', (_req, res) => {
   const users = q.all(
-    `SELECT id, role, name, email, org_name FROM users WHERE email LIKE '%@demo.test' ORDER BY role, id`
+    `SELECT u.id, u.role, u.name, u.email,
+            COALESCE(p.org_name, r.org_name, d.company_name) AS org_name
+     FROM users u
+     LEFT JOIN providers p ON p.user_id = u.id
+     LEFT JOIN recipients r ON r.user_id = u.id
+     LEFT JOIN delivery_partners d ON d.user_id = u.id
+     WHERE u.email LIKE '%@demo.test' ORDER BY u.role, u.id`
   );
   res.json({ accounts: users, password: 'password123' });
 });

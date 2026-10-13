@@ -91,8 +91,8 @@ export default function ListingDetail() {
       const d = await api.get(`/listings/${id}`);
       setData(d.listing);
       if (user.role === 'provider') {
-        const t = await api.get('/tasks');
-        setTasks((t.tasks || []).filter((x) => x.listing_id === Number(id)));
+        const t = await api.get('/assignments');
+        setTasks((t.assignments || []).filter((x) => x.listing_id === Number(id)));
       }
     } catch (e) {
       setError(e.message);
@@ -119,7 +119,7 @@ export default function ListingDetail() {
 
   const explain = async (matchId) => {
     try {
-      const res = await api.post(`/matches/${matchId}/explain`);
+      const res = await api.post(`/offers/${matchId}/explain`);
       setNotice('Explanation rewritten.');
       return res.explanation;
     } catch (e) {
@@ -132,7 +132,7 @@ export default function ListingDetail() {
   if (!data) return <Spinner />;
 
   const isOwner = user.role === 'provider' && data.provider_id === user.id;
-  const flags = data.flags?.flags || [];
+  const flags = data.validation?.flags || [];
   const task = tasks[0];
 
   return (
@@ -181,13 +181,13 @@ export default function ListingDetail() {
 
           <div className="card p-5">
             <h2 className="mb-3 flex items-center gap-2 font-semibold text-navy-800">
-              {data.flags?.eligible ? <BadgeCheck className="h-5 w-5 text-brand" /> : <AlertTriangle className="h-5 w-5 text-red-600" />}
-              Validation {data.flags ? (data.flags.eligible ? 'passed' : 'flagged') : 'pending'}
+              {data.validation?.eligible ? <BadgeCheck className="h-5 w-5 text-brand" /> : <AlertTriangle className="h-5 w-5 text-red-600" />}
+              Validation {data.validation ? (data.validation.eligible ? 'passed' : 'flagged') : 'pending'}
             </h2>
-            {!data.flags && <p className="text-sm text-navy-600">Not yet validated.</p>}
-            {data.flags && (
+            {!data.validation && <p className="text-sm text-navy-600">Not yet validated.</p>}
+            {data.validation && (
               <>
-                <p className="text-sm text-navy-700">{data.flags.summary}</p>
+                <p className="text-sm text-navy-700">{data.validation.summary}</p>
                 <ul className="mt-3 space-y-2">
                   {flags.map((f) => {
                     const sm = severityMeta(f.severity);
@@ -202,14 +202,14 @@ export default function ListingDetail() {
                 </ul>
               </>
             )}
-            <p className="mt-3 text-xs text-navy-500">Checked {data.flags?.checkedAt ? fmtDateTime(data.flags.checkedAt) : '—'}</p>
+            <p className="mt-3 text-xs text-navy-500">Checked {data.validation?.checkedAt ? fmtDateTime(data.validation.checkedAt) : '—'}</p>
           </div>
 
-          {isOwner && data.matches && data.matches.length > 0 && (
+          {isOwner && data.offers && data.offers.length > 0 && (
             <div className="card p-5">
               <h2 className="mb-3 font-semibold text-navy-800">Ranked matches</h2>
               <div className="space-y-3">
-                {(data.matches || []).map((m) => (
+                {(data.offers || []).map((m) => (
                   <MatchCard key={m.id} match={{ ...m, breakdown: safeJson(m.breakdown_json) }} onExplain={explain} />
                 ))}
               </div>

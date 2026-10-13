@@ -11,7 +11,7 @@ export default function RecipientInbox() {
   const [error, setError] = useState('');
 
   const load = useCallback(() => {
-    api.get('/matches/offers').then((d) => setOffers(d.offers)).catch((e) => setError(e.message));
+    api.get('/offers').then((d) => setOffers(d.offers)).catch((e) => setError(e.message));
   }, []);
 
   useEffect(() => {
@@ -22,7 +22,7 @@ export default function RecipientInbox() {
     setBusy(`${id}-${action}`);
     setError('');
     try {
-      await api.post(`/matches/${id}/${action}`);
+      await api.post(`/offers/${id}/${action}`);
       load();
     } catch (e) {
       setError(e.message);

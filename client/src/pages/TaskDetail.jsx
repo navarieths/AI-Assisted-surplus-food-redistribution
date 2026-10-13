@@ -28,9 +28,9 @@ export default function TaskDetail() {
 
   const load = useCallback(() => {
     api
-      .get(`/tasks/${id}`)
+      .get(`/assignments/${id}`)
       .then((d) => {
-        setTask(d.task);
+        setTask(d.assignment);
         return api.get(`/volunteers${api.searchParams({ listing_id: d.task.listing_id })}`);
       })
       .then((d) => setCarriers(d.carriers || []))
@@ -58,25 +58,25 @@ export default function TaskDetail() {
 
   const confirmPickup = () =>
     run('pickup', async () => {
-      await api.post(`/tasks/${id}/pickup`, { otp });
+      await api.post(`/assignments/${id}/pickup`, { otp });
       return { message: 'Pickup verified. Status set to IN_TRANSIT.' };
     });
 
   const confirmDelivery = () =>
     run('deliver', async () => {
-      await api.post(`/tasks/${id}/confirm-delivery`);
+      await api.post(`/assignments/${id}/confirm-delivery`);
       return { message: 'Delivery confirmed. Thank you!' };
     });
 
   const assign = (volunteerId) =>
     run('assign', async () => {
-      await api.post(`/tasks/${id}/assign`, { volunteer_id: volunteerId });
+      await api.post(`/assignments/${id}/assign`, { volunteer_id: volunteerId });
       return { message: 'Carrier assigned.' };
     });
 
   const fallback = () =>
     run('fallback', async () => {
-      const res = await api.post(`/tasks/${id}/fallback`);
+      const res = await api.post(`/assignments/${id}/fallback`);
       return { message: `Fallback assigned to ${res.fallback}.` };
     });
 

@@ -26,7 +26,7 @@ export default function LocationSharer({ taskId, active }) {
         async (pos) => {
           try {
             await api.post('/volunteers/location', {
-              task_id: taskId,
+              assignment_id: taskId,
               lat: pos.coords.latitude,
               lng: pos.coords.longitude,
             });

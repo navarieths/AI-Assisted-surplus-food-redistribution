@@ -2,22 +2,23 @@ import { Router } from 'express';
 import { q } from '../db.js';
 import { authRequired, requireRole } from '../auth.js';
 import {
-  acceptMatch,
-  declineMatch,
+  acceptOffer,
+  declineOffer,
   offerNext,
+  serializeAssignment,
   serializeListing,
-  serializeTask,
 } from '../services/listings.js';
 import { maybeEnhanceExplanation } from '../services/matching.js';
 import { transition } from '../services/workflow.js';
+import { withProfile } from '../services/profiles.js';
 
 const router = Router();
 router.use(authRequired);
 
 /** Recipient inbox: offers and accepted donations. */
-router.get('/offers', requireRole('recipient'), (req, res) => {
+router.get('/', requireRole('recipient'), (req, res) => {
   const rows = q.all(
-    `SELECT * FROM matches WHERE recipient_id = ? AND status IN ('OFFERED','ACCEPTED','DECLINED')
+    `SELECT * FROM offers WHERE recipient_id = ? AND status IN ('OFFERED','ACCEPTED','DECLINED')
      ORDER BY CASE status WHEN 'OFFERED' THEN 0 WHEN 'ACCEPTED' THEN 1 ELSE 2 END, score DESC`,
     [req.user.id]
   );
@@ -35,10 +36,10 @@ router.get('/offers', requireRole('recipient'), (req, res) => {
 
 router.post('/:id/accept', requireRole('recipient'), (req, res, next) => {
   try {
-    const match = q.get(`SELECT * FROM matches WHERE id = ?`, [req.params.id]);
-    if (!match) return res.status(404).json({ error: 'Match not found' });
-    const { task } = acceptMatch(match, req.user, req.user);
-    res.json({ task: serializeTask(task, req.user) });
+    const offer = q.get(`SELECT * FROM offers WHERE id = ?`, [req.params.id]);
+    if (!offer) return res.status(404).json({ error: 'Offer not found' });
+    const { assignment } = acceptOffer(offer, req.user, req.user);
+    res.json({ assignment: serializeAssignment(assignment, req.user) });
   } catch (err) {
     next(err);
   }
@@ -46,10 +47,10 @@ router.post('/:id/accept', requireRole('recipient'), (req, res, next) => {
 
 router.post('/:id/decline', requireRole('recipient'), async (req, res, next) => {
   try {
-    const match = q.get(`SELECT * FROM matches WHERE id = ?`, [req.params.id]);
-    if (!match) return res.status(404).json({ error: 'Match not found' });
-    declineMatch(match, req.user, req.user);
-    const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [match.listing_id]);
+    const offer = q.get(`SELECT * FROM offers WHERE id = ?`, [req.params.id]);
+    if (!offer) return res.status(404).json({ error: 'Offer not found' });
+    declineOffer(offer, req.user, req.user);
+    const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [offer.listing_id]);
     const nextOffer = await maybeNextOffer(listing, req.user);
     res.json({ declined: Number(req.params.id), nextOffered: nextOffer ? nextOffer.id : null });
   } catch (err) {
@@ -60,7 +61,7 @@ router.post('/:id/decline', requireRole('recipient'), async (req, res, next) => 
 async function maybeNextOffer(listing, actor) {
   if (['DELIVERED', 'EXPIRED', 'ACCEPTED'].includes(listing.status)) return null;
   const offered = q.get(
-    `SELECT COUNT(*) AS n FROM matches WHERE listing_id = ? AND status = 'OFFERED'`,
+    `SELECT COUNT(*) AS n FROM offers WHERE listing_id = ? AND status = 'OFFERED'`,
     [listing.id]
   );
   if (offered.n > 0) return null; // other recipients still have live offers
@@ -78,16 +79,16 @@ async function maybeNextOffer(listing, actor) {
 /** Optional: ask the LLM to rewrite the explanation (never the score). */
 router.post('/:id/explain', async (req, res, next) => {
   try {
-    const match = q.get(`SELECT * FROM matches WHERE id = ?`, [req.params.id]);
-    if (!match) return res.status(404).json({ error: 'Match not found' });
-    const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [match.listing_id]);
-    const recipient = q.get(`SELECT * FROM users WHERE id = ?`, [match.recipient_id]);
+    const offer = q.get(`SELECT * FROM offers WHERE id = ?`, [req.params.id]);
+    if (!offer) return res.status(404).json({ error: 'Offer not found' });
+    const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [offer.listing_id]);
+    const recipient = withProfile(q.get(`SELECT * FROM users WHERE id = ?`, [offer.recipient_id]));
     const authorized =
       (req.user.role === 'provider' && listing.provider_id === req.user.id) ||
-      (req.user.role === 'recipient' && match.recipient_id === req.user.id);
+      (req.user.role === 'recipient' && offer.recipient_id === req.user.id);
     if (!authorized) return res.status(403).json({ error: 'Not authorized' });
-    const explanation = await maybeEnhanceExplanation(listing, recipient, match);
-    res.json({ explanation, score: match.score });
+    const explanation = await maybeEnhanceExplanation(listing, recipient, offer);
+    res.json({ explanation, score: offer.score });
   } catch (err) {
     next(err);
   }

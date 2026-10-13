@@ -39,7 +39,7 @@ router.get('/', (req, res) => {
   } else if (req.user.role === 'recipient') {
     // recipients only see listings offered/accepted to them
     clauses.push(
-      `id IN (SELECT listing_id FROM matches WHERE recipient_id = ? AND status IN ('OFFERED','ACCEPTED'))`
+      `id IN (SELECT listing_id FROM offers WHERE recipient_id = ? AND status IN ('OFFERED','ACCEPTED'))`
     );
     params.push(req.user.id);
   }
@@ -72,21 +72,23 @@ router.get('/:id', (req, res) => {
     [listing.id]
   );
 
-  let matches = null;
+  let offers = null;
   if (req.user.role === 'provider' && listing.provider_id === req.user.id) {
-    matches = q.all(
-      `SELECT m.*, u.name AS recipient_name, u.org_name, u.veg_only, u.capacity_servings
-       FROM matches m JOIN users u ON u.id = m.recipient_id WHERE m.listing_id = ? ORDER BY m.rank`,
+    offers = q.all(
+      `SELECT m.*, u.name AS recipient_name, r.org_name, r.veg_only, r.capacity_servings
+       FROM offers m JOIN users u ON u.id = m.recipient_id
+       LEFT JOIN recipients r ON r.user_id = m.recipient_id
+       WHERE m.listing_id = ? ORDER BY m.rank`,
       [listing.id]
     );
   } else if (req.user.role === 'recipient') {
-    matches = q.all(`SELECT * FROM matches WHERE listing_id = ? AND recipient_id = ?`, [
+    offers = q.all(`SELECT * FROM offers WHERE listing_id = ? AND recipient_id = ?`, [
       listing.id,
       req.user.id,
     ]);
   }
 
-  res.json({ listing: serializeListing(listing, req.user, { matches, events }) });
+  res.json({ listing: serializeListing(listing, req.user, { offers, events }) });
 });
 
 router.post('/', requireRole('provider'), async (req, res, next) => {
@@ -105,12 +107,12 @@ router.post('/', requireRole('provider'), async (req, res, next) => {
 
     const { listing: validated } = applyValidation(listing, req.user);
     listing = validated;
-    let matches = [];
+    let offers = [];
     if (listing.status === 'ELIGIBLE') {
-      matches = await refreshMatching(listing, req.user);
+      offers = await refreshMatching(listing, req.user);
       listing = q.get(`SELECT * FROM listings WHERE id = ?`, [listing.id]);
     }
-    res.status(201).json({ listing: serializeListing(listing, req.user, { matches }) });
+    res.status(201).json({ listing: serializeListing(listing, req.user, { offers }) });
   } catch (err) {
     next(err);
   }
@@ -135,12 +137,12 @@ router.patch('/:id', requireRole('provider'), async (req, res, next) => {
     const fresh = q.get(`SELECT * FROM listings WHERE id = ?`, [listing.id]);
     const { listing: validated } = applyValidation(fresh, req.user);
     let updated = validated;
-    let matches = [];
+    let offers = [];
     if (updated.status === 'ELIGIBLE') {
-      matches = await refreshMatching(updated, req.user);
+      offers = await refreshMatching(updated, req.user);
       updated = q.get(`SELECT * FROM listings WHERE id = ?`, [updated.id]);
     }
-    res.json({ listing: serializeListing(updated, req.user, { matches }) });
+    res.json({ listing: serializeListing(updated, req.user, { offers }) });
   } catch (err) {
     next(err);
   }
@@ -164,9 +166,9 @@ router.post('/:id/match', requireRole('provider'), async (req, res, next) => {
     if (listing.status === 'FLAGGED') {
       return res.status(409).json({ error: 'Flagged listings cannot be matched until resolved' });
     }
-    const matches = await refreshMatching(listing, req.user);
+    const offers = await refreshMatching(listing, req.user);
     const updated = q.get(`SELECT * FROM listings WHERE id = ?`, [listing.id]);
-    res.json({ listing: serializeListing(updated, req.user, { matches }) });
+    res.json({ listing: serializeListing(updated, req.user, { offers }) });
   } catch (err) {
     next(err);
   }
@@ -198,18 +200,20 @@ router.post('/:id/at-risk', requireRole('provider'), (req, res, next) => {
   }
 });
 
-router.get('/:id/matches', requireRole('provider'), (req, res) => {
+router.get('/:id/offers', requireRole('provider'), (req, res) => {
   const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [req.params.id]);
   if (!listing || listing.provider_id !== req.user.id) {
     return res.status(404).json({ error: 'Listing not found' });
   }
-  const matches = q.all(
-    `SELECT m.*, u.name AS recipient_name, u.org_name FROM matches m
-     JOIN users u ON u.id = m.recipient_id WHERE m.listing_id = ? ORDER BY m.rank`,
+  const offers = q.all(
+    `SELECT m.*, u.name AS recipient_name, r.org_name FROM offers m
+     JOIN users u ON u.id = m.recipient_id
+     LEFT JOIN recipients r ON r.user_id = m.recipient_id
+     WHERE m.listing_id = ? ORDER BY m.rank`,
     [listing.id]
   );
   res.json({
-    matches: matches.map((m) => ({
+    offers: offers.map((m) => ({
       ...m,
       breakdown: JSON.parse(m.breakdown_json || '{}'),
       breakdown_json: undefined,

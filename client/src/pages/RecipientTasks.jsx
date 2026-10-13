@@ -8,7 +8,7 @@ export default function RecipientTasks() {
   const [tasks, setTasks] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => {
-    api.get('/tasks').then((d) => setTasks(d.tasks)).catch((e) => setError(e.message));
+    api.get('/assignments').then((d) => setTasks(d.assignments)).catch((e) => setError(e.message));
   }, []);
 
   if (error) return <div className="card p-4 text-red-700">{error}</div>;

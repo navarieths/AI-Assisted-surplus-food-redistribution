@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { q } from '../db.js';
 import { haversineKm, routeInfo } from './geo.js';
+import { activeCarriers, activeRecipients } from './profiles.js';
 
 /**
  * Deterministic matching. Works with no AI key.
@@ -26,9 +27,7 @@ function parseHM(hm) {
 
 /** Nearest active volunteer to the pickup point (Haversine, no API call). */
 function nearestVolunteer(listing) {
-  const vols = q.all(
-    `SELECT id, name, lat, lng FROM users WHERE role IN ('volunteer','delivery_partner') AND active = 1 AND lat IS NOT NULL`
-  );
+  const vols = activeCarriers().filter((v) => v.lat != null && v.lng != null);
   let best = null;
   for (const v of vols) {
     const d = haversineKm(listing, v);
@@ -178,10 +177,7 @@ async function llmRewrite(prompt) {
  * Pre-filter by Haversine radius, then use real road distance for top N.
  */
 export async function scoreListing(listing) {
-  const candidates = q
-    .all(
-      `SELECT * FROM users WHERE role = 'recipient' AND active = 1 AND lat IS NOT NULL`
-    )
+  const candidates = activeRecipients()
     .map((r) => ({ ...r, haversineKm: haversineKm(listing, r) }))
     .filter((r) => r.haversineKm <= config.matching.haversinePrefilterKm)
     .sort((a, b) => a.haversineKm - b.haversineKm)
@@ -212,17 +208,17 @@ export async function scoreListing(listing) {
   return { scored, volunteer: vol, volunteerTravelMin };
 }
 
-/** Persist matches for a listing, returning the stored rows (ranked). */
-export async function persistMatches(listing) {
+/** Persist offers for a listing, returning the stored rows (ranked). */
+export async function persistOffers(listing) {
   const { scored } = await scoreListing(listing);
-  const existing = q.all(`SELECT recipient_id FROM matches WHERE listing_id = ?`, [listing.id]);
+  const existing = q.all(`SELECT recipient_id FROM offers WHERE listing_id = ?`, [listing.id]);
   const seen = new Set(existing.map((e) => e.recipient_id));
 
   scored.forEach((s, idx) => {
     const explanation = s.explanation;
     if (seen.has(s.recipient.id)) {
       q.run(
-        `UPDATE matches SET score=?, breakdown_json=?, explanation=?, distance_km=?, duration_min=?,
+        `UPDATE offers SET score=?, breakdown_json=?, explanation=?, distance_km=?, duration_min=?,
          estimated=?, rank=?, updated_at=datetime('now') WHERE listing_id=? AND recipient_id=?`,
         [
           s.score,
@@ -238,7 +234,7 @@ export async function persistMatches(listing) {
       );
     } else {
       q.run(
-        `INSERT INTO matches (listing_id, recipient_id, score, breakdown_json, explanation,
+        `INSERT INTO offers (listing_id, recipient_id, score, breakdown_json, explanation,
           distance_km, duration_min, estimated, rank, status)
          VALUES (?,?,?,?,?,?,?,?,?, 'CANDIDATE')`,
         [
@@ -256,17 +252,17 @@ export async function persistMatches(listing) {
     }
   });
 
-  return q.all(`SELECT * FROM matches WHERE listing_id = ? ORDER BY rank ASC`, [listing.id]);
+  return q.all(`SELECT * FROM offers WHERE listing_id = ? ORDER BY rank ASC`, [listing.id]);
 }
 
 /** Optionally polish the stored explanation with an LLM (never the score). */
-export async function maybeEnhanceExplanation(listing, recipient, match) {
-  const breakdown = JSON.parse(match.breakdown_json || '{}');
-  breakdown.score = match.score;
-  const base = match.explanation || templateExplanation(listing, recipient, breakdown);
+export async function maybeEnhanceExplanation(listing, recipient, offer) {
+  const breakdown = JSON.parse(offer.breakdown_json || '{}');
+  breakdown.score = offer.score;
+  const base = offer.explanation || templateExplanation(listing, recipient, breakdown);
   const rewritten = await llmRewrite(base);
   if (rewritten && rewritten !== base) {
-    q.run(`UPDATE matches SET explanation = ? WHERE id = ?`, [rewritten, match.id]);
+    q.run(`UPDATE offers SET explanation = ? WHERE id = ?`, [rewritten, offer.id]);
     return rewritten;
   }
   return base;

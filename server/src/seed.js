@@ -23,9 +23,14 @@ function resetTables() {
     'volunteer_locations',
     'notifications',
     'status_events',
-    'tasks',
-    'matches',
+    'assignments',
+    'offers',
+    'validation_results',
     'listings',
+    'delivery_partners',
+    'volunteers',
+    'recipients',
+    'providers',
     'users',
   ];
   for (const t of tables) db.exec(`DELETE FROM ${t};`);
@@ -116,11 +121,43 @@ function offlineScore(listing, recipient, volunteerTravelMin = 12) {
   return { distanceKm, durationMin, score, breakdown, explanation };
 }
 
+function insertUser(u, passwordHash) {
+  const info = q.run(
+    `INSERT INTO users (role, name, email, phone, password_hash) VALUES (?,?,?,?,?)`,
+    [u.role, u.name, u.email, u.phone || null, passwordHash]
+  );
+  const userId = Number(info.lastInsertRowid);
+  if (u.role === 'provider') {
+    q.run(`INSERT INTO providers (user_id, org_name, address, lat, lng) VALUES (?,?,?,?,?)`, [
+      userId, u.org_name || null, u.address || null, u.lat, u.lng,
+    ]);
+  } else if (u.role === 'recipient') {
+    q.run(
+      `INSERT INTO recipients (user_id, org_name, address, lat, lng, capacity_servings, veg_only, collection_open, collection_close, reliability)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [
+        userId, u.org_name || null, u.address || null, u.lat, u.lng,
+        u.capacity_servings || 0, u.veg_only || 0, u.collection_open || '08:00',
+        u.collection_close || '22:00', u.reliability ?? 1.0,
+      ]
+    );
+  } else if (u.role === 'volunteer') {
+    q.run(`INSERT INTO volunteers (user_id, address, lat, lng) VALUES (?,?,?,?)`, [
+      userId, u.address || null, u.lat, u.lng,
+    ]);
+  } else if (u.role === 'delivery_partner') {
+    q.run(`INSERT INTO delivery_partners (user_id, company_name, address, lat, lng) VALUES (?,?,?,?,?)`, [
+      userId, u.org_name || null, u.address || null, u.lat, u.lng,
+    ]);
+  }
+  return q.get(`SELECT * FROM users WHERE id = ?`, [userId]);
+}
+
 function insertListing(row) {
   const cols = [
     'provider_id', 'title', 'description', 'food_type', 'quantity_kg', 'servings',
     'prepared_at', 'ready_at', 'pickup_deadline', 'lat', 'lng', 'address',
-    'storage_condition', 'allergens', 'packaging', 'status', 'flags_json', 'created_at',
+    'storage_condition', 'allergens', 'packaging', 'status', 'created_at',
   ];
   const info = q.run(
     `INSERT INTO listings (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`,
@@ -129,17 +166,25 @@ function insertListing(row) {
   return q.get(`SELECT * FROM listings WHERE id = ?`, [info.lastInsertRowid]);
 }
 
-function addMatch(listing, recipient, status, rank, override) {
+function addValidation(listing, result) {
+  q.run(
+    `INSERT INTO validation_results (listing_id, eligible, summary, disclaimer, flags_json)
+     VALUES (?,?,?,?,?)`,
+    [listing.id, result.eligible ? 1 : 0, result.summary, result.disclaimer, JSON.stringify(result.flags)]
+  );
+}
+
+function addOffer(listing, recipient, status, rank, override) {
   const s = override || offlineScore(listing, recipient);
   q.run(
-    `INSERT INTO matches (listing_id, recipient_id, score, breakdown_json, explanation, distance_km,
+    `INSERT INTO offers (listing_id, recipient_id, score, breakdown_json, explanation, distance_km,
       duration_min, estimated, rank, status) VALUES (?,?,?,?,?,?,?,?,?,?)`,
     [
       listing.id, recipient.id, s.score, JSON.stringify(s.breakdown), s.explanation,
       s.distanceKm, s.durationMin, 1, rank, status,
     ]
   );
-  return q.get(`SELECT * FROM matches WHERE listing_id = ? AND recipient_id = ?`, [listing.id, recipient.id]);
+  return q.get(`SELECT * FROM offers WHERE listing_id = ? AND recipient_id = ?`, [listing.id, recipient.id]);
 }
 
 function setListingStatus(listingId, from, to, reason) {
@@ -152,22 +197,20 @@ async function main() {
 
   const pw = hashPassword(PASSWORD);
   const ids = {};
-  for (const u of USERS) {
-    const cols = ['role', 'name', 'email', 'phone', 'password_hash', 'org_name', 'lat', 'lng', 'address'];
-    const info = q.run(
-      `INSERT INTO users (${cols.join(',')}, veg_only, capacity_servings, collection_open, collection_close, reliability)
-       VALUES (${cols.map(() => '?').join(',')}, ?, ?, ?, ?, ?)`,
-      [
-        u.role, u.name, u.email, u.phone || null, pw, u.org_name || null, u.lat, u.lng, u.address,
-        u.veg_only || 0, u.capacity_servings || 0, u.collection_open || '08:00', u.collection_close || '22:00',
-        u.reliability ?? 1.0,
-      ]
-    );
-    ids[u.email] = Number(info.lastInsertRowid);
-  }
+  for (const u of USERS) ids[u.email] = insertUser(u, pw).id;
   const U = (email) => ids[email];
-  const user = (email) => q.get(`SELECT * FROM users WHERE id = ?`, [U(email)]);
-  const provider = (email) => user(email);
+  const user = (email) => {
+    const base = q.get(`SELECT * FROM users WHERE id = ?`, [U(email)]);
+    if (!base) return null;
+    const table = {
+      provider: 'providers',
+      recipient: 'recipients',
+      volunteer: 'volunteers',
+      delivery_partner: 'delivery_partners',
+    }[base.role];
+    const profile = table ? q.get(`SELECT * FROM ${table} WHERE user_id = ?`, [base.id]) : {};
+    return { ...base, ...profile, id: base.id };
+  };
 
   /* ---------------------- 6 listings, 6 states ---------------------- */
 
@@ -180,9 +223,9 @@ async function main() {
     prepared_at: hoursAgo(1), ready_at: hoursFromNow(0.5), pickup_deadline: hoursFromNow(4),
     lat: 12.9757, lng: 77.6068, address: 'MG Road, Bengaluru',
     storage_condition: 'hot', allergens: 'None declared', packaging: 'Sealed food-grade trays',
-    status: 'LISTED', flags_json: null, created_at: hoursAgo(0.2),
+    status: 'LISTED', created_at: hoursAgo(0.2),
   });
-  logEvent(l1.id, null, 'LISTED', provider('spice@demo.test'), 'Listing created');
+  logEvent(l1.id, null, 'LISTED', { id: U('spice@demo.test'), role: 'provider' }, 'Listing created');
 
   // 2. FLAGGED — non-veg stored ambient (high severity)
   const flagged = insertListing({
@@ -193,11 +236,11 @@ async function main() {
     prepared_at: hoursAgo(7), ready_at: hoursAgo(6), pickup_deadline: hoursFromNow(2),
     lat: 12.9719, lng: 77.6412, address: 'Indiranagar, Bengaluru',
     storage_condition: 'ambient', allergens: '', packaging: '',
-    status: 'LISTED', flags_json: null, created_at: hoursAgo(6.5),
+    status: 'LISTED', created_at: hoursAgo(6.5),
   });
   {
     const res = validateListing(flagged);
-    q.run(`UPDATE listings SET flags_json = ? WHERE id = ?`, [JSON.stringify(res), flagged.id]);
+    addValidation(flagged, res);
     setListingStatus(flagged.id, 'LISTED', 'FLAGGED', res.summary);
   }
 
@@ -210,16 +253,16 @@ async function main() {
     prepared_at: hoursAgo(3), ready_at: hoursAgo(0.5), pickup_deadline: hoursFromNow(3),
     lat: 12.925, lng: 77.5938, address: 'Jayanagar, Bengaluru',
     storage_condition: 'ambient', allergens: 'Contains wheat, milk, eggs', packaging: 'Boxed',
-    status: 'LISTED', flags_json: null, created_at: hoursAgo(3),
+    status: 'LISTED', created_at: hoursAgo(3),
   });
   {
     const res = validateListing(l3);
-    q.run(`UPDATE listings SET flags_json = ? WHERE id = ?`, [JSON.stringify(res), l3.id]);
-    logEvent(l3.id, 'LISTED', 'ELIGIBLE', provider('nandini@demo.test'), res.summary);
+    addValidation(l3, res);
+    logEvent(l3.id, 'LISTED', 'ELIGIBLE', { id: U('nandini@demo.test'), role: 'provider' }, res.summary);
     setListingStatus(l3.id, 'ELIGIBLE', 'OFFERED', 'Offered to top 3 matches');
-    addMatch(l3, user('hope@demo.test'), 'OFFERED', 1);
-    addMatch(l3, user('littledrops@demo.test'), 'OFFERED', 2);
-    addMatch(l3, user('seva@demo.test'), 'OFFERED', 3);
+    addOffer(l3, user('hope@demo.test'), 'OFFERED', 1);
+    addOffer(l3, user('littledrops@demo.test'), 'OFFERED', 2);
+    addOffer(l3, user('seva@demo.test'), 'OFFERED', 3);
     notify(U('hope@demo.test'), 'recipient', 'New surplus match', 'Assorted Pastries — accept in your inbox.', l3.id);
     notify(U('littledrops@demo.test'), 'recipient', 'New surplus match', 'Assorted Pastries — accept in your inbox.', l3.id);
   }
@@ -233,17 +276,17 @@ async function main() {
     prepared_at: hoursAgo(1.5), ready_at: hoursAgo(0.5), pickup_deadline: hoursFromNow(5),
     lat: 12.9698, lng: 77.75, address: 'Whitefield, Bengaluru',
     storage_condition: 'hot', allergens: 'None declared', packaging: 'Insulated containers',
-    status: 'LISTED', flags_json: null, created_at: hoursAgo(2),
+    status: 'LISTED', created_at: hoursAgo(2),
   });
   {
     const res = validateListing(l4);
-    q.run(`UPDATE listings SET flags_json = ? WHERE id = ?`, [JSON.stringify(res), l4.id]);
-    logEvent(l4.id, 'LISTED', 'ELIGIBLE', provider('freshmart@demo.test'), res.summary);
+    addValidation(l4, res);
+    logEvent(l4.id, 'LISTED', 'ELIGIBLE', { id: U('freshmart@demo.test'), role: 'provider' }, res.summary);
     setListingStatus(l4.id, 'ELIGIBLE', 'OFFERED', 'Offered to top matches');
     setListingStatus(l4.id, 'OFFERED', 'ACCEPTED', 'Recipient accepted');
-    const m = addMatch(l4, user('annapurna@demo.test'), 'ACCEPTED', 1);
+    const m = addOffer(l4, user('annapurna@demo.test'), 'ACCEPTED', 1);
     q.run(
-      `INSERT INTO tasks (listing_id, match_id, recipient_id, status, delivery_otp)
+      `INSERT INTO assignments (listing_id, offer_id, recipient_id, status, delivery_otp)
        VALUES (?,?,?, 'CREATED', '654321')`,
       [l4.id, m.id, U('annapurna@demo.test')]
     );
@@ -259,22 +302,22 @@ async function main() {
     prepared_at: hoursAgo(2), ready_at: hoursAgo(1.2), pickup_deadline: hoursFromNow(2),
     lat: 12.9757, lng: 77.6068, address: 'MG Road, Bengaluru',
     storage_condition: 'chilled', allergens: 'Contains wheat, milk', packaging: 'Chilled boxes',
-    status: 'LISTED', flags_json: null, created_at: hoursAgo(2.2),
+    status: 'LISTED', created_at: hoursAgo(2.2),
   });
   {
     const res = validateListing(l5);
-    q.run(`UPDATE listings SET flags_json = ? WHERE id = ?`, [JSON.stringify(res), l5.id]);
-    logEvent(l5.id, 'LISTED', 'ELIGIBLE', provider('spice@demo.test'), res.summary);
+    addValidation(l5, res);
+    logEvent(l5.id, 'LISTED', 'ELIGIBLE', { id: U('spice@demo.test'), role: 'provider' }, res.summary);
     setListingStatus(l5.id, 'ELIGIBLE', 'OFFERED', 'Offered to top matches');
     setListingStatus(l5.id, 'OFFERED', 'ACCEPTED', 'Hope Foundation accepted');
-    const m = addMatch(l5, user('hope@demo.test'), 'ACCEPTED', 1);
+    const m = addOffer(l5, user('hope@demo.test'), 'ACCEPTED', 1);
     setListingStatus(l5.id, 'ACCEPTED', 'VOLUNTEER_ASSIGNED', 'Rahul Verma assigned');
     const info = q.run(
-      `INSERT INTO tasks (listing_id, match_id, recipient_id, volunteer_id, status, pickup_otp, delivery_otp, pickup_verified_at)
+      `INSERT INTO assignments (listing_id, offer_id, recipient_id, volunteer_id, status, pickup_otp, delivery_otp, pickup_verified_at)
        VALUES (?,?,?,?, 'IN_TRANSIT', '135790', '246801', datetime('now','-18 minutes'))`,
       [l5.id, m.id, U('hope@demo.test'), U('rahul@demo.test')]
     );
-    const taskId = Number(info.lastInsertRowid);
+    const assignmentId = Number(info.lastInsertRowid);
     setListingStatus(l5.id, 'VOLUNTEER_ASSIGNED', 'PICKED_UP', 'Pickup OTP verified');
     setListingStatus(l5.id, 'PICKED_UP', 'IN_TRANSIT', 'En route to recipient');
     // a short breadcrumb trail between MG Road and Koramangala
@@ -283,9 +326,9 @@ async function main() {
     ];
     trail.forEach(([lat, lng], i) => {
       q.run(
-        `INSERT INTO volunteer_locations (task_id, volunteer_id, lat, lng, recorded_at)
+        `INSERT INTO volunteer_locations (assignment_id, volunteer_id, lat, lng, recorded_at)
          VALUES (?,?,?,?, datetime('now', ?))`,
-        [taskId, U('rahul@demo.test'), lat, lng, `-${(trail.length - i) * 3} minutes`]
+        [assignmentId, U('rahul@demo.test'), lat, lng, `-${(trail.length - i) * 3} minutes`]
       );
     });
     notify(U('hope@demo.test'), 'recipient', 'Donation on the way', 'Rahul Verma picked up your sandwiches.', l5.id);
@@ -300,18 +343,18 @@ async function main() {
     prepared_at: hoursAgo(5), ready_at: hoursAgo(4), pickup_deadline: hoursAgo(1),
     lat: 12.925, lng: 77.5938, address: 'Jayanagar, Bengaluru',
     storage_condition: 'ambient', allergens: 'Contains wheat, gluten', packaging: 'Sealed packets',
-    status: 'LISTED', flags_json: null, created_at: hoursAgo(6),
+    status: 'LISTED', created_at: hoursAgo(6),
   });
   {
     const res = validateListing(l6);
-    q.run(`UPDATE listings SET flags_json = ? WHERE id = ?`, [JSON.stringify(res), l6.id]);
-    logEvent(l6.id, 'LISTED', 'ELIGIBLE', provider('nandini@demo.test'), res.summary);
+    addValidation(l6, res);
+    logEvent(l6.id, 'LISTED', 'ELIGIBLE', { id: U('nandini@demo.test'), role: 'provider' }, res.summary);
     setListingStatus(l6.id, 'ELIGIBLE', 'OFFERED', 'Offered');
     setListingStatus(l6.id, 'OFFERED', 'ACCEPTED', 'Hope Foundation accepted');
-    const m = addMatch(l6, user('hope@demo.test'), 'ACCEPTED', 1);
+    const m = addOffer(l6, user('hope@demo.test'), 'ACCEPTED', 1);
     setListingStatus(l6.id, 'ACCEPTED', 'VOLUNTEER_ASSIGNED', 'Priya Nair assigned');
-    const info = q.run(
-      `INSERT INTO tasks (listing_id, match_id, recipient_id, volunteer_id, status, pickup_otp, delivery_otp, pickup_verified_at, delivered_at)
+    q.run(
+      `INSERT INTO assignments (listing_id, offer_id, recipient_id, volunteer_id, status, pickup_otp, delivery_otp, pickup_verified_at, delivered_at)
        VALUES (?,?,?,?, 'DELIVERED', '111222', '333444', datetime('now','-4 hours'), datetime('now','-3 hours'))`,
       [l6.id, m.id, U('hope@demo.test'), U('priya@demo.test')]
     );
@@ -319,20 +362,18 @@ async function main() {
     setListingStatus(l6.id, 'PICKED_UP', 'IN_TRANSIT', 'En route');
     setListingStatus(l6.id, 'IN_TRANSIT', 'DELIVERED', 'Recipient confirmed delivery');
     notify(U('nandini@demo.test'), 'provider', 'Donation delivered', 'Hope Foundation confirmed receipt.', l6.id);
-    void info;
   }
 
   /* --------------- extra historical deliveries for the impact page --------------- */
   const history = [
-    { provider: 'spice@demo.test', recipient: 'asha@demo.test', volunteer: 'arjun@demo.test', title: 'Party Snacks', kg: 10, servings: 45, food: 'veg', days: 1, p: 0, r: 0 },
-    { provider: 'greenleaf@demo.test', recipient: 'seva@demo.test', volunteer: 'rahul@demo.test', title: 'Veg Pulao', kg: 18, servings: 70, food: 'veg', days: 2, p: 1, r: 1 },
-    { provider: 'freshmart@demo.test', recipient: 'littledrops@demo.test', volunteer: 'priya@demo.test', title: 'Fresh Produce Crates', kg: 22, servings: 80, food: 'veg', days: 3, p: 2, r: 2 },
-    { provider: 'nandini@demo.test', recipient: 'annapurna@demo.test', volunteer: 'sneha@demo.test', title: 'Cakes & Desserts', kg: 7, servings: 30, food: 'veg', days: 4, p: 3, r: 3 },
+    { provider: 'spice@demo.test', recipient: 'asha@demo.test', volunteer: 'arjun@demo.test', title: 'Party Snacks', kg: 10, servings: 45, food: 'veg', days: 1 },
+    { provider: 'greenleaf@demo.test', recipient: 'seva@demo.test', volunteer: 'rahul@demo.test', title: 'Veg Pulao', kg: 18, servings: 70, food: 'veg', days: 2 },
+    { provider: 'freshmart@demo.test', recipient: 'littledrops@demo.test', volunteer: 'priya@demo.test', title: 'Fresh Produce Crates', kg: 22, servings: 80, food: 'veg', days: 3 },
+    { provider: 'nandini@demo.test', recipient: 'annapurna@demo.test', volunteer: 'sneha@demo.test', title: 'Cakes & Desserts', kg: 7, servings: 30, food: 'veg', days: 4 },
   ];
-  const geoOf = (email) => user(email);
   history.forEach((h) => {
-    const pUser = geoOf(h.provider);
-    const rUser = geoOf(h.recipient);
+    const pUser = user(h.provider);
+    const rUser = user(h.recipient);
     const listing = insertListing({
       provider_id: pUser.id, title: h.title,
       description: `Historical delivered donation: ${h.title}.`,
@@ -341,19 +382,19 @@ async function main() {
       pickup_deadline: iso(NOW - (h.days * D + 2 * H)),
       lat: pUser.lat, lng: pUser.lng, address: pUser.address,
       storage_condition: 'chilled', allergens: 'None declared', packaging: 'Sealed',
-      status: 'LISTED', flags_json: null, created_at: iso(NOW - (h.days * D + 7 * H)),
+      status: 'LISTED', created_at: iso(NOW - (h.days * D + 7 * H)),
     });
     const res = validateListing({ ...listing, prepared_at: iso(NOW - 2 * H) });
-    q.run(`UPDATE listings SET flags_json = ? WHERE id = ?`, [JSON.stringify(res), listing.id]);
+    addValidation(listing, res);
     logEvent(listing.id, 'LISTED', 'ELIGIBLE', { id: 1, role: 'system' }, 'Passed checks (historical)');
     setListingStatus(listing.id, 'ELIGIBLE', 'OFFERED', 'Offered');
     setListingStatus(listing.id, 'OFFERED', 'ACCEPTED', 'Accepted');
-    const m = addMatch(listing, rUser, 'ACCEPTED', 1);
+    const m = addOffer(listing, rUser, 'ACCEPTED', 1);
     setListingStatus(listing.id, 'ACCEPTED', 'VOLUNTEER_ASSIGNED', 'Volunteer assigned');
     q.run(
-      `INSERT INTO tasks (listing_id, match_id, recipient_id, volunteer_id, status, pickup_otp, delivery_otp, pickup_verified_at, delivered_at)
+      `INSERT INTO assignments (listing_id, offer_id, recipient_id, volunteer_id, status, pickup_otp, delivery_otp, pickup_verified_at, delivered_at)
        VALUES (?,?,?,?, 'DELIVERED', '000000', '999999', datetime('now', ?), datetime('now', ?))`,
-      [listing.id, m.id, rUser.id, geoOf(h.volunteer).id, `-${h.days * 24 + 4} hours`, `-${h.days * 24 + 3} hours`]
+      [listing.id, m.id, rUser.id, user(h.volunteer).id, `-${h.days * 24 + 4} hours`, `-${h.days * 24 + 3} hours`]
     );
     setListingStatus(listing.id, 'VOLUNTEER_ASSIGNED', 'PICKED_UP', 'Pickup verified');
     setListingStatus(listing.id, 'PICKED_UP', 'IN_TRANSIT', 'En route');
@@ -361,13 +402,14 @@ async function main() {
   });
 
   const counts = q.get(`SELECT
-    (SELECT COUNT(*) FROM users WHERE role='provider') AS providers,
-    (SELECT COUNT(*) FROM users WHERE role='recipient') AS recipients,
-    (SELECT COUNT(*) FROM users WHERE role='volunteer') AS volunteers,
-    (SELECT COUNT(*) FROM users WHERE role='delivery_partner') AS partners,
+    (SELECT COUNT(*) FROM providers) AS providers,
+    (SELECT COUNT(*) FROM recipients) AS recipients,
+    (SELECT COUNT(*) FROM volunteers) AS volunteers,
+    (SELECT COUNT(*) FROM delivery_partners) AS partners,
     (SELECT COUNT(*) FROM listings WHERE id <= 6) AS core_listings,
     (SELECT COUNT(*) FROM listings) AS listings,
-    (SELECT COUNT(*) FROM tasks WHERE status='DELIVERED') AS delivered`);
+    (SELECT COUNT(*) FROM offers) AS offers,
+    (SELECT COUNT(*) FROM assignments WHERE status='DELIVERED') AS delivered`);
 
   console.log('Seed complete:', counts);
   console.log('Demo password for all accounts: ' + PASSWORD);

@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { config } from './config.js';
 import { q } from './db.js';
+import { withProfile } from './services/profiles.js';
 
 export function hashPassword(pw) {
   return bcrypt.hashSync(pw, 10);
@@ -29,7 +30,7 @@ export function authRequired(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Authentication required' });
   try {
     const payload = jwt.verify(token, config.jwtSecret);
-    const user = q.get(`SELECT * FROM users WHERE id = ?`, [payload.id]);
+    const user = withProfile(q.get(`SELECT * FROM users WHERE id = ?`, [payload.id]));
     if (!user || !user.active) return res.status(401).json({ error: 'Account not found' });
     req.user = user;
     next();

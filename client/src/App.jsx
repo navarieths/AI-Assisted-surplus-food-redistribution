@@ -2,6 +2,7 @@ import { Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { useAuth } from './lib/auth.jsx';
 import Layout from './components/Layout.jsx';
+import Landing from './pages/Landing.jsx';
 import Login from './pages/Login.jsx';
 import ProviderDashboard from './pages/ProviderDashboard.jsx';
 import ListingForm from './pages/ListingForm.jsx';
@@ -42,9 +43,10 @@ function Home() {
 export default function App() {
   return (
     <Routes>
+      <Route path="/" element={<Landing />} />
       <Route path="/login" element={<Login />} />
       <Route element={<Protected />}>
-        <Route path="/" element={<Home />} />
+        <Route path="/home" element={<Home />} />
         <Route path="/provider" element={<ProviderDashboard />} />
         <Route path="/listings/new" element={<ListingForm />} />
         <Route path="/listings/:id" element={<ListingDetail />} />

@@ -9,6 +9,21 @@ export const db = new Database(config.dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+/**
+ * Normalised schema:
+ *   users              — identity + auth for every role
+ *   providers          — provider profile (keyed by user_id)
+ *   recipients         — recipient profile (keyed by user_id)
+ *   volunteers         — volunteer profile (keyed by user_id)
+ *   delivery_partners  — delivery partner profile (keyed by user_id)
+ *   listings           — surplus food listings
+ *   validation_results — rule-check history for a listing
+ *   offers             — deterministic matches offered to recipients
+ *   assignments        — pickup/delivery jobs (offer accepted -> assigned carrier)
+ *   status_events      — every workflow transition
+ *   notifications      — simulated notifications
+ *   volunteer_locations— live carrier breadcrumbs for tracking
+ */
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -17,18 +32,46 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT NOT NULL UNIQUE,
   phone TEXT,
   password_hash TEXT NOT NULL,
-  org_name TEXT,
-  lat REAL,
-  lng REAL,
-  address TEXT,
-  veg_only INTEGER NOT NULL DEFAULT 0,
-  capacity_servings INTEGER NOT NULL DEFAULT 0,
-  reliability REAL NOT NULL DEFAULT 1.0,
-  collection_open TEXT NOT NULL DEFAULT '08:00',
-  collection_close TEXT NOT NULL DEFAULT '22:00',
-  max_distance_km REAL NOT NULL DEFAULT 30,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS providers (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  org_name TEXT,
+  address TEXT,
+  lat REAL,
+  lng REAL
+);
+
+CREATE TABLE IF NOT EXISTS recipients (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  org_name TEXT,
+  address TEXT,
+  lat REAL,
+  lng REAL,
+  capacity_servings INTEGER NOT NULL DEFAULT 0,
+  veg_only INTEGER NOT NULL DEFAULT 0,
+  collection_open TEXT NOT NULL DEFAULT '08:00',
+  collection_close TEXT NOT NULL DEFAULT '22:00',
+  reliability REAL NOT NULL DEFAULT 1.0
+);
+
+CREATE TABLE IF NOT EXISTS volunteers (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  address TEXT,
+  lat REAL,
+  lng REAL,
+  vehicle TEXT
+);
+
+CREATE TABLE IF NOT EXISTS delivery_partners (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  company_name TEXT,
+  address TEXT,
+  lat REAL,
+  lng REAL,
+  vehicle TEXT
 );
 
 CREATE TABLE IF NOT EXISTS listings (
@@ -50,9 +93,18 @@ CREATE TABLE IF NOT EXISTS listings (
   allergens TEXT,
   packaging TEXT,
   status TEXT NOT NULL DEFAULT 'LISTED',
-  flags_json TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS validation_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+  eligible INTEGER NOT NULL DEFAULT 0,
+  summary TEXT,
+  disclaimer TEXT,
+  flags_json TEXT,
+  checked_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS status_events (
@@ -66,7 +118,7 @@ CREATE TABLE IF NOT EXISTS status_events (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS matches (
+CREATE TABLE IF NOT EXISTS offers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
   recipient_id INTEGER NOT NULL REFERENCES users(id),
@@ -84,10 +136,10 @@ CREATE TABLE IF NOT EXISTS matches (
   UNIQUE (listing_id, recipient_id)
 );
 
-CREATE TABLE IF NOT EXISTS tasks (
+CREATE TABLE IF NOT EXISTS assignments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
-  match_id INTEGER REFERENCES matches(id),
+  offer_id INTEGER REFERENCES offers(id),
   recipient_id INTEGER NOT NULL REFERENCES users(id),
   volunteer_id INTEGER REFERENCES users(id),
   status TEXT NOT NULL DEFAULT 'CREATED',
@@ -102,7 +154,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE TABLE IF NOT EXISTS volunteer_locations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
   volunteer_id INTEGER NOT NULL REFERENCES users(id),
   lat REAL NOT NULL,
   lng REAL NOT NULL,
@@ -123,15 +175,55 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);
 CREATE INDEX IF NOT EXISTS idx_listings_provider ON listings(provider_id);
-CREATE INDEX IF NOT EXISTS idx_matches_listing ON matches(listing_id);
-CREATE INDEX IF NOT EXISTS idx_matches_recipient ON matches(recipient_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_volunteer ON tasks(volunteer_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_recipient ON tasks(recipient_id);
+CREATE INDEX IF NOT EXISTS idx_validation_listing ON validation_results(listing_id);
+CREATE INDEX IF NOT EXISTS idx_offers_listing ON offers(listing_id);
+CREATE INDEX IF NOT EXISTS idx_offers_recipient ON offers(recipient_id);
+CREATE INDEX IF NOT EXISTS idx_assignments_volunteer ON assignments(volunteer_id);
+CREATE INDEX IF NOT EXISTS idx_assignments_recipient ON assignments(recipient_id);
 CREATE INDEX IF NOT EXISTS idx_events_listing ON status_events(listing_id);
-CREATE INDEX IF NOT EXISTS idx_vloc_task ON volunteer_locations(task_id);
+CREATE INDEX IF NOT EXISTS idx_vloc_assignment ON volunteer_locations(assignment_id);
 `;
 
+const LEGACY_TABLES = [
+  'volunteer_locations',
+  'notifications',
+  'status_events',
+  'assignments',
+  'offers',
+  'validation_results',
+  'listings',
+  'delivery_partners',
+  'volunteers',
+  'recipients',
+  'providers',
+  'users',
+  // pre-normalisation tables
+  'tasks',
+  'matches',
+];
+
+/**
+ * The demo database is disposable. If we detect the older, de-normalised schema
+ * (single users table with profile columns / matches / tasks), drop the app
+ * tables so the new normalised schema can be created. Re-run `npm run seed`.
+ */
+function migrateLegacySchema() {
+  const has = (name) =>
+    Boolean(
+      db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`).get(name)
+    );
+  const listingCols = has('listings')
+    ? db.prepare(`PRAGMA table_info(listings)`).all().map((c) => c.name)
+    : [];
+  const legacy = has('matches') || has('tasks') || listingCols.includes('flags_json');
+  if (!legacy) return;
+  // eslint-disable-next-line no-console
+  console.warn('[db] legacy schema detected — recreating tables. Run `npm run seed` to repopulate.');
+  db.exec(LEGACY_TABLES.map((t) => `DROP TABLE IF EXISTS ${t};`).join('\n'));
+}
+
 export function initSchema() {
+  migrateLegacySchema();
   db.exec(SCHEMA);
 }
 

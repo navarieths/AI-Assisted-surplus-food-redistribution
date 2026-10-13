@@ -11,7 +11,7 @@ export default function VolunteerAvailable() {
   const [error, setError] = useState('');
 
   const load = useCallback(() => {
-    api.get('/tasks/available').then((d) => setTasks(d.tasks)).catch((e) => setError(e.message));
+    api.get('/assignments/available').then((d) => setTasks(d.assignments)).catch((e) => setError(e.message));
   }, []);
   useEffect(load, [load]);
 
@@ -19,7 +19,7 @@ export default function VolunteerAvailable() {
     setBusy(id);
     setError('');
     try {
-      await api.post(`/tasks/${id}/claim`);
+      await api.post(`/assignments/${id}/claim`);
       load();
     } catch (e) {
       setError(e.message);

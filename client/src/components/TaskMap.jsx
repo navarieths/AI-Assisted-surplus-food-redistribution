@@ -13,7 +13,7 @@ export default function TaskMap({ taskId, height = 340, pollMs = 5000 }) {
 
   const load = useCallback(async () => {
     try {
-      const d = await api.get(`/tasks/${taskId}/track`);
+      const d = await api.get(`/assignments/${taskId}/track`);
       setData(d);
       setUpdated(new Date());
       setError('');
