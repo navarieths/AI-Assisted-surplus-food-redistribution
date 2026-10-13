@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-brand-50 text-navy-900 antialiased;
+  margin: 0;
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-navy-800 text-white hover:bg-navy-600;
+  }
+  .btn-green {
+    @apply btn bg-brand text-white hover:bg-brand-600;
+  }
+  .btn-ghost {
+    @apply btn border border-navy-100 bg-white text-navy-800 hover:bg-navy-50;
+  }
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700;
+  }
+  .card {
+    @apply rounded-2xl border border-navy-100/70 bg-white shadow-card;
+  }
+  .input {
+    @apply w-full rounded-lg border border-navy-100 bg-white px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand-100;
+  }
+  .label {
+    @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-navy-600;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
+}
+
+/* Leaflet must sit above card content but below modals */
+.leaflet-container {
+  font-family: inherit;
+  z-index: 0;
+}
+.leaflet-pane {
+  z-index: 0;
+}

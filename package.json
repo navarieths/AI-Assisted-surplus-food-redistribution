@@ -1,0 +1,22 @@
+{
+  "name": "surplus-food-redistribution",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-Assisted Surplus Food Redistribution Platform (hackathon)",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c green,navy \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm --workspace server run dev",
+    "dev:client": "npm --workspace client run dev",
+    "seed": "npm --workspace server run seed",
+    "test": "npm --workspace server test",
+    "build": "npm --workspace client run build",
+    "start": "npm --workspace server run start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
