@@ -94,7 +94,9 @@ export default function ProviderDashboard() {
               <span className="text-xs text-navy-500">#{l.id}</span>
             </div>
             {l.validation?.flags?.length > 0 && (
-              <p className="mt-2 text-xs text-amber-700">{l.validation.flags.length} validation note(s) — open to review.</p>
+              <p className="mt-2 text-xs text-amber-700">
+                {l.validation.flags.length} validation note(s) — open to review, fix and resubmit.
+              </p>
             )}
           </Link>
         ))}

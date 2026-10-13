@@ -27,6 +27,9 @@ const defaults = () => ({
   storage_condition: 'hot',
   allergens: '',
   packaging: '',
+  handling_notes: '',
+  contact_name: '',
+  contact_phone: '',
   location: null,
 });
 
@@ -56,6 +59,9 @@ export default function ListingForm() {
           storage_condition: listing.storage_condition,
           allergens: listing.allergens || '',
           packaging: listing.packaging || '',
+          handling_notes: listing.handling_notes || '',
+          contact_name: listing.provider?.contact_name || '',
+          contact_phone: listing.provider?.phone || '',
           location: { lat: listing.lat, lng: listing.lng, address: listing.address },
         });
       })
@@ -85,6 +91,9 @@ export default function ListingForm() {
       storage_condition: form.storage_condition,
       allergens: form.allergens,
       packaging: form.packaging,
+      handling_notes: form.handling_notes,
+      contact_name: form.contact_name,
+      contact_phone: form.contact_phone,
       lat: form.location.lat,
       lng: form.location.lng,
       address: form.location.address,
@@ -155,6 +164,35 @@ export default function ListingForm() {
           </Field>
           <Field label="Packaging">
             <input className="input" value={form.packaging} onChange={(e) => set({ packaging: e.target.value })} placeholder="e.g. Sealed trays" />
+          </Field>
+        </div>
+        <Field
+          label="Handling & storage instructions"
+          hint="How should this food be kept before pickup?"
+        >
+          <textarea
+            className="input"
+            rows={2}
+            value={form.handling_notes}
+            onChange={(e) => set({ handling_notes: e.target.value })}
+            placeholder="e.g. Keep above 60°C in insulated containers; do not reheat."
+          />
+        </Field>
+      </div>
+
+      <div className="card space-y-4 p-5">
+        <div>
+          <h2 className="font-semibold text-navy-800">Pickup contact</h2>
+          <p className="text-xs text-navy-600">
+            Shared only with authorized participants of an accepted donation.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Contact name">
+            <input className="input" value={form.contact_name} onChange={(e) => set({ contact_name: e.target.value })} placeholder="Who should volunteers ask for?" />
+          </Field>
+          <Field label="Contact phone">
+            <input className="input" value={form.contact_phone} onChange={(e) => set({ contact_phone: e.target.value })} placeholder="+91 …" />
           </Field>
         </div>
       </div>

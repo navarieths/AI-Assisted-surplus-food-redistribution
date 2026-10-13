@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "disclaimer": "Checks are rule-based on provider-entered details. This platform does not certify food safety.",
+  "blockingSeverities": ["high"],
+  "settings": {
+    "minDescriptionLength": 10,
+    "deadlineSoonMinutes": 30,
+    "prepMaxAgeHours": 6,
+    "prepAgingHours": 4,
+    "prepFutureGraceHours": 0.25
+  },
+  "rules": {
+    "location_missing": {
+      "enabled": true,
+      "severity": "high",
+      "message": "Pickup location is missing on the map."
+    },
+    "location_invalid": {
+      "enabled": true,
+      "severity": "high",
+      "message": "Pickup coordinates are out of range."
+    },
+    "ready_missing": {
+      "enabled": true,
+      "severity": "high",
+      "message": "A food-ready time is required."
+    },
+    "deadline_missing": {
+      "enabled": true,
+      "severity": "high",
+      "message": "A pickup deadline is required."
+    },
+    "window_inverted": {
+      "enabled": true,
+      "severity": "high",
+      "message": "Food-ready time must be before the pickup deadline."
+    },
+    "deadline_past": {
+      "enabled": true,
+      "severity": "high",
+      "message": "The pickup deadline is already in the past."
+    },
+    "deadline_soon": {
+      "enabled": true,
+      "severity": "medium",
+      "message": "Less than {minutes} minutes remain before the pickup deadline."
+    },
+    "quantity_zero": {
+      "enabled": true,
+      "severity": "high",
+      "message": "Quantity must be greater than zero."
+    },
+    "servings_zero": {
+      "enabled": true,
+      "severity": "medium",
+      "message": "Servings estimate is missing or zero."
+    },
+    "cold_chain": {
+      "enabled": true,
+      "severity": "high",
+      "message": "Non-vegetarian food must be stored chilled, frozen or hot — ambient is unsafe."
+    },
+    "hot_no_prep": {
+      "enabled": true,
+      "severity": "medium",
+      "message": "Hot food should declare when it was prepared."
+    },
+    "prep_too_old": {
+      "enabled": true,
+      "severity": "high",
+      "message": "Food was prepared {age}h ago (limit {max}h)."
+    },
+    "prep_aging": {
+      "enabled": true,
+      "severity": "medium",
+      "message": "Food was prepared more than {min}h ago."
+    },
+    "prep_future": {
+      "enabled": true,
+      "severity": "medium",
+      "message": "Prepared time is in the future."
+    },
+    "packaging_missing": {
+      "enabled": true,
+      "severity": "medium",
+      "message": "Describe packaging for ambient perishable food."
+    },
+    "allergens_undeclared": {
+      "enabled": true,
+      "severity": "medium",
+      "message": "Allergen information has not been declared."
+    },
+    "handling_undeclared": {
+      "enabled": true,
+      "severity": "low",
+      "message": "Handling/storage instructions have not been described."
+    },
+    "description_thin": {
+      "enabled": true,
+      "severity": "low",
+      "message": "Add a short description of the food (at least {min} characters)."
+    },
+    "address_missing": {
+      "enabled": true,
+      "severity": "low",
+      "message": "A human-readable pickup address is missing."
+    }
+  }
+}

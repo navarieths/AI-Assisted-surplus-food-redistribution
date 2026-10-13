@@ -4,6 +4,25 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/** Default matching weights (must total 100). Override with MATCH_WEIGHTS (JSON). */
+export const DEFAULT_MATCH_WEIGHTS = Object.freeze({
+  foodCompatibility: 25,
+  demand: 25,
+  quantityFit: 15,
+  roadDistance: 20,
+  timeFeasibility: 15,
+});
+
+function parseWeights(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export const config = {
   port: Number(process.env.PORT || 4000),
   jwtSecret: process.env.JWT_SECRET || 'hackathon-dev-secret-change-me',
@@ -26,7 +45,9 @@ export const config = {
   matching: {
     haversinePrefilterKm: Number(process.env.MATCH_RADIUS_KM || 30),
     topN: Number(process.env.MATCH_TOP_N || 10),
+    resultLimit: Number(process.env.MATCH_RESULT_LIMIT || 5),
     offerLimit: Number(process.env.MATCH_OFFER_LIMIT || 5),
+    weights: { ...DEFAULT_MATCH_WEIGHTS, ...(parseWeights(process.env.MATCH_WEIGHTS) || {}) },
   },
 
   geo: {

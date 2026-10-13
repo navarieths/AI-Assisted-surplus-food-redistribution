@@ -5,16 +5,38 @@ import { activeCarriers, activeRecipients } from './profiles.js';
 
 /**
  * Deterministic matching. Works with no AI key.
+ *
+ * Pipeline:
+ *   1. Haversine pre-filter to the closest N candidates (no API calls).
+ *   2. Hard filters: recipient must accept the food category, and the pickup
+ *      window must be feasible (pickup before deadline, delivery inside the
+ *      recipient's collection hours).
+ *   3. Weighted score (default 25/25/15/20/15, see config.matching.weights)
+ *      using real road distance from OSRM for the routed candidates.
+ *   4. Return the top `config.matching.resultLimit` (default 5) with
+ *      explanation strings and an `estimated` flag for the distance.
+ *
  * An LLM can only rewrite the human-readable explanation, never the score.
  */
 
-const WEIGHTS = {
-  proximity: 35,
-  capacity: 20,
-  feasibility: 25,
-  foodPreference: 10,
-  reliability: 10,
-};
+export const WEIGHT_KEYS = [
+  'foodCompatibility',
+  'demand',
+  'quantityFit',
+  'roadDistance',
+  'timeFeasibility',
+];
+
+const DEFAULT_VOLUNTEER_TRAVEL_MIN = 15;
+
+function clamp01(n) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+function round1(n) {
+  return Math.round((Number(n) || 0) * 10) / 10;
+}
 
 function minutesOfDay(date) {
   return date.getHours() * 60 + date.getMinutes();
@@ -23,6 +45,280 @@ function minutesOfDay(date) {
 function parseHM(hm) {
   const [h, m] = String(hm || '00:00').split(':').map(Number);
   return h * 60 + (m || 0);
+}
+
+function fmtTime(iso) {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/* ------------------------------ weights ---------------------------------- */
+
+/** Merge overrides onto the configured weights, keeping only known keys. */
+export function resolveWeights(overrides = {}) {
+  const base = config.matching.weights || {};
+  const merged = {};
+  for (const key of WEIGHT_KEYS) {
+    const value = overrides[key] ?? base[key];
+    merged[key] = Number.isFinite(Number(value)) ? Number(value) : 0;
+  }
+  return merged;
+}
+
+export function weightsTotal(weights) {
+  return round1(WEIGHT_KEYS.reduce((sum, key) => sum + (Number(weights[key]) || 0), 0));
+}
+
+/* --------------------------- hard-filter inputs -------------------------- */
+
+/** Categories a recipient accepts. Falls back to `veg_only` for legacy rows. */
+export function acceptedCategories(recipient) {
+  const raw = recipient?.accepted_categories;
+  if (raw && String(raw).trim()) {
+    return String(raw)
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  return recipient?.veg_only ? ['veg'] : ['veg', 'nonveg'];
+}
+
+/**
+ * A recipient's single preferred category, or null when they accept anything.
+ * The first category in `accepted_categories` is treated as the preference.
+ */
+export function preferredCategory(recipient) {
+  if (recipient?.veg_only) return 'veg';
+  const raw = recipient?.accepted_categories;
+  if (raw && String(raw).trim()) {
+    const first = String(raw).split(',')[0].trim().toLowerCase();
+    return first || null;
+  }
+  return null;
+}
+
+/** 0..1 — how well the listing's food type matches the recipient's preference. */
+export function foodCompatibilityRatio(recipient, listing) {
+  const cats = acceptedCategories(recipient);
+  const foodType = String(listing?.food_type || '').toLowerCase();
+  if (!cats.includes(foodType)) return 0; // would be hard-filtered
+  const preferred = preferredCategory(recipient);
+  if (!preferred) return 1; // accepts anything
+  return preferred === foodType ? 1 : 0.6; // accepted, but not first choice
+}
+
+/** 0..1 — fit between listing servings and the recipient's capacity. */
+export function quantityFitRatio(recipient, listing) {
+  const capacity = Number(recipient?.capacity_servings) || 0;
+  const servings = Number(listing?.servings) || 0;
+  if (capacity <= 0) return 1; // unknown capacity -> no penalty
+  if (servings <= capacity) return 1;
+  const overflow = servings / capacity; // > 1
+  return clamp01(2 - overflow); // 1x -> full, 2x -> 0
+}
+
+/** 0..1 — closer is better; 0 at or beyond the prefilter radius. */
+export function roadDistanceRatio(distanceKm, radius = config.matching.haversinePrefilterKm) {
+  const r = Number(radius) || config.matching.haversinePrefilterKm;
+  return clamp01(1 - (Number(distanceKm) || 0) / r);
+}
+
+/** 0..1 — recipient demand/need level. */
+export function demandRatio(recipient) {
+  return clamp01(Number(recipient?.demand ?? 0.5));
+}
+
+/* --------------------------- time feasibility ---------------------------- */
+
+/**
+ * Evaluate the pickup/delivery window.
+ *
+ * Hard constraints: pickup must happen before the deadline and delivery must
+ * land inside the recipient's collection hours. When feasible, `ratio` scores
+ * how much slack remains (comfortable windows score higher).
+ */
+export function evaluateTimeFeasibility({
+  listing,
+  recipient,
+  route,
+  volunteerTravelMin = DEFAULT_VOLUNTEER_TRAVEL_MIN,
+}) {
+  const readyAt = new Date(listing.ready_at);
+  const deadline = new Date(listing.pickup_deadline);
+  const durationMin = Number(route?.durationMin) || 0;
+  const pickupArrival = new Date(readyAt.getTime() + volunteerTravelMin * 60000);
+  const recipientArrival = new Date(pickupArrival.getTime() + durationMin * 60000);
+
+  const beforeDeadline = pickupArrival.getTime() <= deadline.getTime();
+
+  const windowMin = (deadline.getTime() - readyAt.getTime()) / 60000;
+  const deliverySlackMin = (deadline.getTime() - recipientArrival.getTime()) / 60000;
+  const deadlineRatio =
+    windowMin > 0 ? clamp01(deliverySlackMin / windowMin) : beforeDeadline ? 1 : 0;
+
+  const open = parseHM(recipient.collection_open);
+  const close = parseHM(recipient.collection_close);
+  const arrivalMin = minutesOfDay(recipientArrival);
+  const withinCollection = arrivalMin >= open && arrivalMin <= close;
+  const halfSpan = Math.max(1, (close - open) / 2);
+  const collectionRatio = withinCollection
+    ? clamp01(Math.min(arrivalMin - open, close - arrivalMin) / halfSpan)
+    : 0;
+
+  const reasons = [];
+  if (!beforeDeadline) reasons.push('Pickup would happen after the deadline.');
+  if (!withinCollection) reasons.push('Delivery falls outside recipient collection hours.');
+
+  const feasible = beforeDeadline && withinCollection;
+  const ratio = feasible ? clamp01(0.6 * deadlineRatio + 0.4 * collectionRatio) : 0;
+
+  return {
+    feasible,
+    beforeDeadline,
+    withinCollection,
+    deadlineRatio,
+    collectionRatio,
+    ratio,
+    reasons,
+    pickupArrival,
+    recipientArrival,
+  };
+}
+
+/** Reasons a recipient cannot serve a listing (empty array => passes). */
+export function hardFilterReasons({ listing, recipient, route, volunteerTravelMin }) {
+  const reasons = [];
+  if (foodCompatibilityRatio(recipient, listing) === 0) {
+    reasons.push(
+      `Food category "${listing.food_type}" is not accepted (accepts ${acceptedCategories(recipient).join(', ')}).`
+    );
+  }
+  const time = evaluateTimeFeasibility({ listing, recipient, route, volunteerTravelMin });
+  reasons.push(...time.reasons);
+  return reasons;
+}
+
+/* -------------------------------- scoring -------------------------------- */
+
+/** Score one recipient against a listing. Pure — takes an already-fetched route. */
+export function scoreCandidate({
+  listing,
+  recipient,
+  route,
+  volunteerTravelMin = DEFAULT_VOLUNTEER_TRAVEL_MIN,
+  weights = config.matching.weights,
+  radius = config.matching.haversinePrefilterKm,
+}) {
+  const w = resolveWeights(weights);
+  const time = evaluateTimeFeasibility({ listing, recipient, route, volunteerTravelMin });
+  const ratios = {
+    foodCompatibility: foodCompatibilityRatio(recipient, listing),
+    demand: demandRatio(recipient),
+    quantityFit: quantityFitRatio(recipient, listing),
+    roadDistance: roadDistanceRatio(route.distanceKm, radius),
+    timeFeasibility: time.ratio,
+  };
+
+  const parts = {};
+  for (const key of WEIGHT_KEYS) parts[key] = ratios[key] * w[key];
+  const score = round1(WEIGHT_KEYS.reduce((sum, key) => sum + parts[key], 0));
+
+  const breakdown = {
+    foodCompatibility: round1(parts.foodCompatibility),
+    demand: round1(parts.demand),
+    quantityFit: round1(parts.quantityFit),
+    roadDistance: round1(parts.roadDistance),
+    timeFeasibility: round1(parts.timeFeasibility),
+    weights: w,
+    ratios,
+    distanceKm: route.distanceKm,
+    durationMin: route.durationMin,
+    estimated: Boolean(route.estimated),
+    volunteerTravelMin,
+    pickupBy: time.pickupArrival.toISOString(),
+    arrivalAt: time.recipientArrival.toISOString(),
+    collectionHours: `${recipient.collection_open}-${recipient.collection_close}`,
+    acceptedCategories: acceptedCategories(recipient),
+    demandLevel: ratios.demand,
+    capacityServings: recipient.capacity_servings,
+    feasible: time.feasible,
+    feasibilityReasons: time.reasons,
+    score,
+  };
+
+  return { score, breakdown };
+}
+
+/** Deterministic, human-readable, no AI required. */
+export function templateExplanation(listing, recipient, breakdown) {
+  const bits = [];
+  bits.push(
+    `${recipient.name} is ${breakdown.distanceKm} km / ~${breakdown.durationMin} min from the pickup point (${breakdown.estimated ? 'estimated, not a live road route' : 'live road route'}).`
+  );
+  bits.push(
+    breakdown.feasible
+      ? `Timings fit: pickup by ${fmtTime(breakdown.pickupBy)} and delivery inside collection hours (${breakdown.collectionHours}).`
+      : `Timing risk: ${breakdown.feasibilityReasons.join(' ') || 'delivery window is tight.'}`
+  );
+  bits.push(
+    breakdown.ratios?.foodCompatibility === 1
+      ? 'Food type matches their preference.'
+      : 'Food type is accepted but not their first preference.'
+  );
+  const fitPct = Math.round((breakdown.ratios?.quantityFit ?? 0) * 100);
+  const demandPct = Math.round((breakdown.demandLevel ?? 0) * 100);
+  bits.push(`Quantity fit ${fitPct}% of capacity; demand ${demandPct}%.`);
+  bits.push(`Deterministic score ${breakdown.score ?? ''} (0-100).`);
+  return bits.join(' ');
+}
+
+/* ------------------------------ orchestration ---------------------------- */
+
+/**
+ * Apply hard filters, score, rank and cap the results.
+ * `routeFn` is injectable so this can be unit-tested without the network.
+ */
+export async function rankCandidates({
+  listing,
+  candidates,
+  routeFn = routeInfo,
+  volunteerTravelMin = DEFAULT_VOLUNTEER_TRAVEL_MIN,
+  weights = config.matching.weights,
+  radius = config.matching.haversinePrefilterKm,
+  limit = config.matching.resultLimit,
+} = {}) {
+  const scored = [];
+  const filtered = { category: 0, time: 0 };
+
+  for (const recipient of candidates || []) {
+    if (foodCompatibilityRatio(recipient, listing) === 0) {
+      filtered.category += 1;
+      continue;
+    }
+    const route = await routeFn(listing, recipient);
+    const time = evaluateTimeFeasibility({ listing, recipient, route, volunteerTravelMin });
+    if (!time.feasible) {
+      filtered.time += 1;
+      continue;
+    }
+    const { score, breakdown } = scoreCandidate({
+      listing,
+      recipient,
+      route,
+      volunteerTravelMin,
+      weights,
+      radius,
+    });
+    const explanation = templateExplanation(listing, recipient, breakdown);
+    scored.push({ recipient, score, breakdown, explanation, route, volunteerTravelMin });
+  }
+
+  scored.sort((a, b) => b.score - a.score || a.recipient.id - b.recipient.id);
+  return {
+    scored: scored.slice(0, limit),
+    ranked: scored,
+    filtered,
+    considered: (candidates || []).length,
+  };
 }
 
 /** Nearest active volunteer to the pickup point (Haversine, no API call). */
@@ -36,177 +332,35 @@ function nearestVolunteer(listing) {
   return best;
 }
 
-function feasibility({ listing, recipient, readyAt, volunteerTravelMin, deliveryMin }) {
-  const deadline = new Date(listing.pickup_deadline);
-  const pickupArrival = new Date(readyAt.getTime() + volunteerTravelMin * 60000);
-  const recipientArrival = new Date(pickupArrival.getTime() + deliveryMin * 60000);
-
-  const reasons = [];
-  const beforeDeadline = pickupArrival <= deadline;
-  if (!beforeDeadline) reasons.push('Pickup would happen after the deadline.');
-
-  const open = parseHM(recipient.collection_open);
-  const close = parseHM(recipient.collection_close);
-  const arr = minutesOfDay(recipientArrival);
-  const withinCollection = arr >= open && arr <= close;
-  if (!withinCollection) reasons.push('Delivery falls outside recipient collection hours.');
-
-  return {
-    feasible: beforeDeadline && withinCollection,
-    beforeDeadline,
-    withinCollection,
-    pickupArrival,
-    recipientArrival,
-    reasons,
-  };
-}
-
-function scoreOne({ listing, recipient, route, volunteerTravelMin }) {
-  const radius = config.matching.haversinePrefilterKm;
-
-  // proximity: 35 at 0km, 0 at radius+
-  const proximity = Math.max(0, 1 - route.distanceKm / radius) * WEIGHTS.proximity;
-
-  // capacity fit
-  let capacity = WEIGHTS.capacity;
-  if (recipient.capacity_servings > 0) {
-    if (listing.servings <= recipient.capacity_servings) capacity = WEIGHTS.capacity;
-    else {
-      const overflow = listing.servings / recipient.capacity_servings;
-      capacity = Math.max(0, WEIGHTS.capacity * (2 - overflow) / 1); // 1x -> full, 2x -> 0
-    }
-  }
-
-  // food preference
-  const foodPreference =
-    recipient.veg_only && listing.food_type === 'nonveg' ? 0 : WEIGHTS.foodPreference;
-
-  // reliability
-  const reliability = Math.max(0, Math.min(1, recipient.reliability)) * WEIGHTS.reliability;
-
-  // feasibility
-  const readyAt = new Date(listing.ready_at);
-  const feas = feasibility({
-    listing,
-    recipient,
-    readyAt,
-    volunteerTravelMin,
-    deliveryMin: route.durationMin,
-  });
-  const feasibilityScore = feas.feasible ? WEIGHTS.feasibility : 0;
-
-  const score =
-    Math.round((proximity + capacity + foodPreference + reliability + feasibilityScore) * 10) / 10;
-
-  const breakdown = {
-    proximity: Math.round(proximity * 10) / 10,
-    capacity: Math.round(capacity * 10) / 10,
-    feasibility: feasibilityScore,
-    foodPreference,
-    reliability: Math.round(reliability * 10) / 10,
-    weights: WEIGHTS,
-    distanceKm: route.distanceKm,
-    durationMin: route.durationMin,
-    estimated: route.estimated,
-    volunteerTravelMin,
-    pickupBy: feas.pickupArrival.toISOString(),
-    arrivalAt: feas.recipientArrival.toISOString(),
-    feasibilityReasons: feas.reasons,
-    collectionHours: `${recipient.collection_open}-${recipient.collection_close}`,
-    movable: feas.feasible,
-  };
-
-  return { score, breakdown };
-}
-
-/** Deterministic, human-readable, no AI required. */
-export function templateExplanation(listing, recipient, breakdown) {
-  const bits = [];
-  bits.push(
-    `${recipient.name} is ${breakdown.distanceKm} km / ~${breakdown.durationMin} min from the pickup point (${breakdown.estimated ? 'estimated' : 'live road route'}).`
-  );
-  bits.push(
-    breakdown.movable
-      ? `Timings fit: a volunteer can collect by ${new Date(breakdown.pickupBy).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} and deliver inside collection hours (${breakdown.collectionHours}).`
-      : `Timing risk: ${breakdown.feasibilityReasons.join(' ') || 'delivery window is tight.'}`
-  );
-  if (breakdown.foodPreference === 0) bits.push('Food type conflicts with this recipient preference.');
-  if (recipient.capacity_servings > 0) bits.push(`Capacity ${recipient.capacity_servings} servings vs ${listing.servings} offered.`);
-  bits.push(`Deterministic score ${breakdown.score ?? ''} (0-100).`);
-  return bits.join(' ');
-}
-
-async function llmRewrite(prompt) {
-  if (!config.llm.apiKey) return null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6000);
-  try {
-    const res = await fetch(`${config.llm.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.llm.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.llm.model,
-        temperature: 0.2,
-        max_tokens: 120,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'Rewrite the given match rationale in one short friendly sentence. Do not change numbers, distances or scores. Never claim food safety certification.',
-          },
-          { role: 'user', content: prompt },
-        ],
-      }),
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data?.choices?.[0]?.message?.content?.trim() || null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /**
- * Score all eligible recipients for a listing.
- * Pre-filter by Haversine radius, then use real road distance for top N.
+ * Score every recipient for a listing: Haversine pre-filter, then routeInfo for
+ * the top candidates, hard filters, weighted scoring, and the top N results.
  */
 export async function scoreListing(listing) {
+  const radius = config.matching.haversinePrefilterKm;
   const candidates = activeRecipients()
     .map((r) => ({ ...r, haversineKm: haversineKm(listing, r) }))
-    .filter((r) => r.haversineKm <= config.matching.haversinePrefilterKm)
+    .filter((r) => r.haversineKm <= radius)
     .sort((a, b) => a.haversineKm - b.haversineKm)
     .slice(0, config.matching.topN);
 
-  const vol = nearestVolunteer(listing);
-  let volunteerTravelMin = 15; // fallback assumption when no volunteer exists
-  if (vol) {
-    const vr = await routeInfo(vol, listing);
+  const volunteer = nearestVolunteer(listing);
+  let volunteerTravelMin = DEFAULT_VOLUNTEER_TRAVEL_MIN;
+  if (volunteer) {
+    const vr = await routeInfo(volunteer, listing);
     volunteerTravelMin = vr.durationMin;
   }
 
-  const scored = [];
-  for (const recipient of candidates) {
-    const route = await routeInfo(listing, recipient);
-    const { score, breakdown } = scoreOne({
-      listing,
-      recipient,
-      route,
-      volunteerTravelMin,
-    });
-    breakdown.score = score;
-    const explanation = templateExplanation(listing, recipient, breakdown);
-    scored.push({ recipient, score, breakdown, explanation, route, volunteerTravelMin });
-  }
+  const { scored, filtered, considered } = await rankCandidates({
+    listing,
+    candidates,
+    volunteerTravelMin,
+  });
 
-  scored.sort((a, b) => b.score - a.score || a.recipient.id - b.recipient.id);
-  return { scored, volunteer: vol, volunteerTravelMin };
+  return { scored, filtered, considered, volunteer, volunteerTravelMin };
 }
+
+/* ------------------------------- persistence ----------------------------- */
 
 /** Persist offers for a listing, returning the stored rows (ranked). */
 export async function persistOffers(listing) {
@@ -266,4 +420,40 @@ export async function maybeEnhanceExplanation(listing, recipient, offer) {
     return rewritten;
   }
   return base;
+}
+
+async function llmRewrite(prompt) {
+  if (!config.llm.apiKey) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const res = await fetch(`${config.llm.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.llm.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.llm.model,
+        temperature: 0.2,
+        max_tokens: 120,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Rewrite the given match rationale in one short friendly sentence. Do not change numbers, distances or scores. Never claim food safety certification.',
+          },
+          { role: 'user', content: prompt },
+        ],
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content?.trim() || null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }

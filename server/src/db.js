@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS recipients (
   lng REAL,
   capacity_servings INTEGER NOT NULL DEFAULT 0,
   veg_only INTEGER NOT NULL DEFAULT 0,
+  accepted_categories TEXT,
+  demand REAL NOT NULL DEFAULT 0.5,
   collection_open TEXT NOT NULL DEFAULT '08:00',
   collection_close TEXT NOT NULL DEFAULT '22:00',
   reliability REAL NOT NULL DEFAULT 1.0
@@ -92,6 +94,9 @@ CREATE TABLE IF NOT EXISTS listings (
     CHECK (storage_condition IN ('ambient','chilled','frozen','hot')),
   allergens TEXT,
   packaging TEXT,
+  handling_notes TEXT,
+  contact_name TEXT,
+  contact_phone TEXT,
   status TEXT NOT NULL DEFAULT 'LISTED',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -222,9 +227,33 @@ function migrateLegacySchema() {
   db.exec(LEGACY_TABLES.map((t) => `DROP TABLE IF EXISTS ${t};`).join('\n'));
 }
 
+/**
+ * Additively add columns that were introduced after a database was first
+ * created, so existing demo data survives schema evolution.
+ */
+function ensureColumns(table, columns) {
+  const existing = new Set(
+    db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name)
+  );
+  for (const [name, type] of columns) {
+    if (!existing.has(name)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    }
+  }
+}
+
 export function initSchema() {
   migrateLegacySchema();
   db.exec(SCHEMA);
+  ensureColumns('listings', [
+    ['handling_notes', 'TEXT'],
+    ['contact_name', 'TEXT'],
+    ['contact_phone', 'TEXT'],
+  ]);
+  ensureColumns('recipients', [
+    ['accepted_categories', 'TEXT'],
+    ['demand', 'REAL NOT NULL DEFAULT 0.5'],
+  ]);
 }
 
 export const q = {

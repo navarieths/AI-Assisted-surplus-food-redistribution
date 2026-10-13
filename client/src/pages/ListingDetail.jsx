@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   BadgeCheck,
   Clock,
+  Pencil,
   RefreshCw,
   Sparkles,
   Truck,
@@ -12,7 +13,7 @@ import {
 import { api } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 import { MapView } from '../components/MapView.jsx';
-import { pickupIcon } from '../lib/leafletIcons.js';
+import { dropIcon, pickupIcon } from '../lib/leafletIcons.js';
 import { ErrorNote, SafetyDisclaimer, Spinner, StatusBadge } from '../components/ui.jsx';
 import { fmtDateTime, fromNow, num, severityMeta, statusMeta } from '../lib/format.js';
 
@@ -51,11 +52,11 @@ function MatchCard({ match, onExplain }) {
         <span className="rounded-lg bg-navy-800 px-2.5 py-1 text-sm font-bold text-white">{num(match.score)}</span>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-        <ScoreBar label="proximity" value={b.proximity} max={w.proximity} />
-        <ScoreBar label="capacity" value={b.capacity} max={w.capacity} />
-        <ScoreBar label="feasibility" value={b.feasibility} max={w.feasibility} />
-        <ScoreBar label="food pref" value={b.foodPreference} max={w.foodPreference} />
-        <ScoreBar label="reliability" value={b.reliability} max={w.reliability} />
+        <ScoreBar label="food fit" value={b.foodCompatibility} max={w.foodCompatibility} />
+        <ScoreBar label="demand" value={b.demand} max={w.demand} />
+        <ScoreBar label="quantity fit" value={b.quantityFit} max={w.quantityFit} />
+        <ScoreBar label="road distance" value={b.roadDistance} max={w.roadDistance} />
+        <ScoreBar label="time feasibility" value={b.timeFeasibility} max={w.timeFeasibility} />
       </div>
       {b.feasibilityReasons?.length > 0 && (
         <p className="mt-2 text-xs text-amber-700">{b.feasibilityReasons.join(' ')}</p>
@@ -82,6 +83,7 @@ export default function ListingDetail() {
   const { user } = useAuth();
   const [data, setData] = useState(null);
   const [tasks, setTasks] = useState([]);
+  const [matchMap, setMatchMap] = useState(null);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -91,8 +93,12 @@ export default function ListingDetail() {
       const d = await api.get(`/listings/${id}`);
       setData(d.listing);
       if (user.role === 'provider') {
-        const t = await api.get('/assignments');
+        const [t, mm] = await Promise.all([
+          api.get('/assignments'),
+          api.get(`/listings/${id}/matches`).catch(() => null),
+        ]);
         setTasks((t.assignments || []).filter((x) => x.listing_id === Number(id)));
+        setMatchMap(mm);
       }
     } catch (e) {
       setError(e.message);
@@ -154,6 +160,37 @@ export default function ListingDetail() {
 
       <SafetyDisclaimer />
       <ErrorNote>{error}</ErrorNote>
+
+      {data.status === 'FLAGGED' && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+            <div className="space-y-2">
+              <div>
+                <p className="font-semibold text-red-800">
+                  This listing is flagged and is not being offered to recipients.
+                </p>
+                <p className="text-sm text-red-700">
+                  Fix the blocking reasons below, then edit and resubmit to re-run the checks.
+                </p>
+              </div>
+              <ul className="list-disc space-y-1 pl-4 text-sm text-red-700">
+                {(flags.filter((f) => f.severity === 'high').length
+                  ? flags.filter((f) => f.severity === 'high')
+                  : flags
+                ).map((f) => (
+                  <li key={f.code}>{f.message}</li>
+                ))}
+              </ul>
+              {isOwner && (
+                <Link to={`/listings/${data.id}/edit`} className="btn-danger">
+                  <Pencil className="h-4 w-4" /> Edit &amp; resubmit
+                </Link>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {notice && <p className="rounded-lg bg-brand-50 px-3 py-2 text-sm text-brand-700">{notice}</p>}
 
       <div className="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
@@ -168,11 +205,12 @@ export default function ListingDetail() {
               <div><dt className="text-navy-600">Pickup deadline</dt><dd className="font-medium">{fmtDateTime(data.pickup_deadline)} ({fromNow(data.pickup_deadline)})</dd></div>
               <div><dt className="text-navy-600">Allergens</dt><dd className="font-medium">{data.allergens || 'Not declared'}</dd></div>
               <div className="col-span-2"><dt className="text-navy-600">Packaging</dt><dd className="font-medium">{data.packaging || '—'}</dd></div>
+              <div className="col-span-2"><dt className="text-navy-600">Handling &amp; storage</dt><dd className="font-medium">{data.handling_notes || '—'}</dd></div>
               <div className="col-span-2"><dt className="text-navy-600">Description</dt><dd>{data.description || '—'}</dd></div>
             </dl>
             {data.provider?.contactVisible ? (
               <p className="mt-3 rounded-lg bg-brand-50 px-3 py-2 text-xs text-brand-700">
-                Provider contact: {data.provider.phone || '—'} · {data.provider.email}
+                Provider contact: {data.provider.contact_name || data.provider.name} · {data.provider.phone || '—'} · {data.provider.email}
               </p>
             ) : (
               <p className="mt-3 text-xs text-navy-500">Contact details are visible only to authorized participants of this donation.</p>
@@ -213,6 +251,42 @@ export default function ListingDetail() {
                   <MatchCard key={m.id} match={{ ...m, breakdown: safeJson(m.breakdown_json) }} onExplain={explain} />
                 ))}
               </div>
+            </div>
+          )}
+
+          {isOwner && matchMap && matchMap.matches && matchMap.matches.length > 0 && (
+            <div className="card p-5">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-semibold text-navy-800">Match map</h2>
+                <span className="text-xs text-navy-600">
+                  Top {matchMap.matches.length} of {matchMap.resultLimit} ·{' '}
+                  {matchMap.estimated ? 'some distances estimated' : 'live road routes'}
+                </span>
+              </div>
+              <MapView
+                markers={[
+                  {
+                    lat: matchMap.pickup.lat,
+                    lng: matchMap.pickup.lng,
+                    icon: pickupIcon,
+                    title: `Pickup — ${matchMap.pickup.title}`,
+                    label: matchMap.pickup.address,
+                  },
+                  ...matchMap.matches.map((m) => ({
+                    lat: m.recipient.lat,
+                    lng: m.recipient.lng,
+                    icon: dropIcon,
+                    title: `#${m.rank} ${m.recipient.org_name || m.recipient.name}`,
+                    label: `${num(m.distanceKm)} km · score ${num(m.score)}${m.estimated ? ' (estimated)' : ''}`,
+                  })),
+                ]}
+                polylines={matchMap.matches.map((m) => m.route).filter(Boolean)}
+                height={360}
+              />
+              <p className="mt-2 text-xs text-navy-500">
+                Green pin = pickup, navy pins = matched recipients. Distances marked “estimated” use a
+                Haversine fallback because the live road route was unavailable.
+              </p>
             </div>
           )}
         </div>

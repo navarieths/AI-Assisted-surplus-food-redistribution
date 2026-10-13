@@ -62,6 +62,9 @@ export function latestValidation(listingId) {
 
 export function serializeListing(listing, user, { offers = null, events = null } = {}) {
   if (!listing) return null;
+  // Never leak the per-listing contact fields through the top-level spread;
+  // they are re-added below only for authorised participants.
+  const { contact_name, contact_phone, ...safe } = listing;
   const provider = providerRow(listing.provider_id);
   const authorized = canViewContact(listing, user);
   const providerPublic = {
@@ -72,13 +75,14 @@ export function serializeListing(listing, user, { offers = null, events = null }
     lng: provider?.lng,
     address: provider?.address,
     // contact details gated to authorized participants of this donation
-    phone: authorized ? provider?.phone : null,
+    phone: authorized ? contact_phone || provider?.phone : null,
     email: authorized ? provider?.email : null,
+    contact_name: authorized ? contact_name || provider?.name : null,
     contactVisible: authorized,
   };
 
   return {
-    ...listing,
+    ...safe,
     validation: latestValidation(listing.id),
     provider: providerPublic,
     offers,

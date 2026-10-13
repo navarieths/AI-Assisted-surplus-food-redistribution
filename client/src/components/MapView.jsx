@@ -19,13 +19,16 @@ function Fit({ points }) {
 export function MapView({
   markers = [],
   polyline = [],
+  polylines = [],
   height = 320,
   center = [12.9716, 77.5946],
   zoom = 12,
   fit = true,
+  colors = ['#1E9E5A', '#0B2545', '#E0A800', '#2563EB', '#DB2777'],
 }) {
   const mapConfig = useMapConfig();
-  const allPoints = [...markers.map((m) => [m.lat, m.lng]), ...polyline];
+  const routes = polylines.length ? polylines : polyline.length > 1 ? [polyline] : [];
+  const allPoints = [...markers.map((m) => [m.lat, m.lng]), ...routes.flat()];
   return (
     <div className="overflow-hidden rounded-xl border border-navy-100" style={{ height }}>
       <MapContainer center={center} zoom={zoom} style={{ height: '100%', width: '100%' }} scrollWheelZoom>
@@ -33,7 +36,13 @@ export function MapView({
           <TileLayer url={mapConfig.tileUrl} attribution={mapConfig.attribution} maxZoom={mapConfig.maxZoom || 19} />
         )}
         {fit && <Fit points={allPoints} />}
-        {polyline.length > 1 && <Polyline positions={polyline} pathOptions={{ color: '#1E9E5A', weight: 5, opacity: 0.85 }} />}
+        {routes.map((pts, i) => (
+          <Polyline
+            key={`route-${i}`}
+            positions={pts}
+            pathOptions={{ color: colors[i % colors.length], weight: 4, opacity: 0.8 }}
+          />
+        ))}
         {markers.map((m, i) => (
           <Marker key={`${m.lat}-${m.lng}-${i}`} position={[m.lat, m.lng]} icon={m.icon}>
             {(m.title || m.label) && (

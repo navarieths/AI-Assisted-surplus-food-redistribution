@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import { q } from '../db.js';
+import { config } from '../config.js';
 import { authRequired, requireRole } from '../auth.js';
 import { logEvent, transition } from '../services/workflow.js';
+import { routeInfo } from '../services/geo.js';
 import {
   applyValidation,
   refreshMatching,
@@ -26,6 +28,9 @@ const FIELDS = [
   'storage_condition',
   'allergens',
   'packaging',
+  'handling_notes',
+  'contact_name',
+  'contact_phone',
 ];
 
 router.get('/', (req, res) => {
@@ -219,6 +224,84 @@ router.get('/:id/offers', requireRole('provider'), (req, res) => {
       breakdown_json: undefined,
     })),
   });
+});
+
+/**
+ * Provider match map: the top matches with recipient coordinates and the road
+ * route from the pickup point, for drawing markers + polylines.
+ */
+router.get('/:id/matches', requireRole('provider'), async (req, res, next) => {
+  try {
+    const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [req.params.id]);
+    if (!listing || listing.provider_id !== req.user.id) {
+      return res.status(404).json({ error: 'Listing not found' });
+    }
+    const rows = q.all(
+      `SELECT m.id, m.score, m.rank, m.status, m.explanation, m.breakdown_json,
+              m.distance_km, m.duration_min, m.estimated,
+              u.id AS recipient_id, u.name AS recipient_name, u.phone, u.email,
+              r.org_name, r.lat, r.lng, r.address, r.capacity_servings, r.accepted_categories, r.demand
+       FROM offers m
+       JOIN users u ON u.id = m.recipient_id
+       JOIN recipients r ON r.user_id = m.recipient_id
+       WHERE m.listing_id = ?
+       ORDER BY m.rank ASC
+       LIMIT ?`,
+      [listing.id, config.matching.resultLimit]
+    );
+
+    const matches = [];
+    for (const m of rows) {
+      let route = null;
+      let estimated = Boolean(m.estimated);
+      if (m.lat != null && m.lng != null) {
+        const info = await routeInfo(
+          { lat: listing.lat, lng: listing.lng },
+          { lat: m.lat, lng: m.lng }
+        );
+        route = info.geometryLatLng;
+        estimated = info.estimated;
+      }
+      matches.push({
+        offerId: m.id,
+        rank: m.rank,
+        status: m.status,
+        score: m.score,
+        explanation: m.explanation,
+        breakdown: JSON.parse(m.breakdown_json || '{}'),
+        distanceKm: m.distance_km,
+        durationMin: m.duration_min,
+        estimated,
+        route,
+        recipient: {
+          id: m.recipient_id,
+          name: m.recipient_name,
+          org_name: m.org_name,
+          address: m.address,
+          lat: m.lat,
+          lng: m.lng,
+          capacityServings: m.capacity_servings,
+          acceptedCategories: m.accepted_categories,
+          demand: m.demand,
+        },
+      });
+    }
+
+    res.json({
+      pickup: {
+        lat: listing.lat,
+        lng: listing.lng,
+        title: listing.title,
+        address: listing.address,
+      },
+      resultLimit: config.matching.resultLimit,
+      estimated: matches.some((m) => m.estimated),
+      weights: config.matching.weights,
+      matches,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;

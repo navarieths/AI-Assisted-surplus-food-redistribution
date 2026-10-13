@@ -20,12 +20,23 @@ function insertProfile(role, userId, body) {
       userId, org_name || null, address || null, lat ?? null, lng ?? null,
     ]);
   } else if (role === 'recipient') {
+    const available = body?.accepted_categories || body?.accepted_food;
+    const accepted =
+      available !== undefined
+        ? String(available).trim() || null
+        : veg_only
+          ? 'veg'
+          : 'veg,nonveg';
+    const demand = body?.demand !== undefined && body?.demand !== null && body?.demand !== ''
+      ? Math.max(0, Math.min(1, Number(body.demand)))
+      : 0.5;
     q.run(
-      `INSERT INTO recipients (user_id, org_name, address, lat, lng, capacity_servings, veg_only)
-       VALUES (?,?,?,?,?,?,?)`,
+      `INSERT INTO recipients (user_id, org_name, address, lat, lng, capacity_servings, veg_only, accepted_categories, demand)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
       [
         userId, org_name || null, address || null, lat ?? null, lng ?? null,
         capacity_servings ? Number(capacity_servings) : 0, veg_only ? 1 : 0,
+        accepted, demand,
       ]
     );
   } else if (role === 'volunteer') {

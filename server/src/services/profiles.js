@@ -34,6 +34,7 @@ export function activeRecipients() {
   return q.all(
     `SELECT u.id, u.name, u.email, u.role, u.phone,
             r.org_name, r.address, r.lat, r.lng, r.capacity_servings, r.veg_only,
+            r.accepted_categories, r.demand,
             r.collection_open, r.collection_close, r.reliability
      FROM recipients r JOIN users u ON u.id = r.user_id
      WHERE u.active = 1 AND r.lat IS NOT NULL`

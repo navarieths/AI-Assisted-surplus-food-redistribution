@@ -26,6 +26,7 @@ export default function Login() {
     org_name: '',
     veg_only: false,
     capacity_servings: 0,
+    demand: 0.5,
     location: null,
   });
 
@@ -68,6 +69,7 @@ export default function Login() {
         org_name: reg.org_name,
         veg_only: reg.veg_only,
         capacity_servings: reg.capacity_servings,
+        demand: reg.demand,
         lat: reg.location?.lat,
         lng: reg.location?.lng,
         address: reg.location?.address,
@@ -164,8 +166,11 @@ export default function Login() {
                 {reg.role === 'recipient' && (
                   <div className="grid grid-cols-2 items-end gap-3">
                     <Field label="Capacity (servings)"><input className="input" type="number" min="0" value={reg.capacity_servings} onChange={(e) => setReg({ ...reg, capacity_servings: Number(e.target.value) })} /></Field>
-                    <label className="flex items-center gap-2 pb-2 text-sm">
-                      <input type="checkbox" checked={reg.veg_only} onChange={(e) => setReg({ ...reg, veg_only: e.target.checked })} /> Vegetarian only
+                    <Field label="Demand level (0–1)" hint="Higher = greater current need">
+                      <input className="input" type="number" min="0" max="1" step="0.1" value={reg.demand} onChange={(e) => setReg({ ...reg, demand: Number(e.target.value) })} />
+                    </Field>
+                    <label className="col-span-2 flex items-center gap-2 text-sm">
+                      <input type="checkbox" checked={reg.veg_only} onChange={(e) => setReg({ ...reg, veg_only: e.target.checked })} /> Accept vegetarian food only
                     </label>
                   </div>
                 )}

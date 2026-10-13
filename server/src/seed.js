@@ -2,6 +2,7 @@ import { db, q } from './db.js';
 import { hashPassword } from './auth.js';
 import { logEvent, notify } from './services/workflow.js';
 import { validateListing } from './services/validate.js';
+import { scoreCandidate, templateExplanation } from './services/matching.js';
 
 /**
  * Seed: 4 providers, 5 recipients, 4 volunteers, 3 delivery partners and 6
@@ -44,11 +45,11 @@ const USERS = [
   { role: 'provider', name: 'Nandini Bakery', org_name: 'Nandini Bakery', email: 'nandini@demo.test', phone: '+91 90000 10003', lat: 12.925, lng: 77.5938, address: 'Jayanagar, Bengaluru' },
   { role: 'provider', name: 'FreshMart Supermarket', org_name: 'FreshMart', email: 'freshmart@demo.test', phone: '+91 90000 10004', lat: 12.9698, lng: 77.75, address: 'Whitefield, Bengaluru' },
   // --- 5 recipients ---
-  { role: 'recipient', name: 'Hope Foundation', org_name: 'Hope Foundation', email: 'hope@demo.test', phone: '+91 90000 20001', lat: 12.9352, lng: 77.6245, address: 'Koramangala, Bengaluru', capacity_servings: 120, veg_only: 0, collection_open: '08:00', collection_close: '21:00', reliability: 0.95 },
-  { role: 'recipient', name: 'Annapurna Community Kitchen', org_name: 'Annapurna Kitchen', email: 'annapurna@demo.test', phone: '+91 90000 20002', lat: 12.9856, lng: 77.6051, address: 'Shivajinagar, Bengaluru', capacity_servings: 200, veg_only: 1, collection_open: '07:00', collection_close: '22:00', reliability: 0.9 },
-  { role: 'recipient', name: 'Asha Trust Shelter', org_name: 'Asha Trust', email: 'asha@demo.test', phone: '+91 90000 20003', lat: 12.9916, lng: 77.555, address: 'Rajajinagar, Bengaluru', capacity_servings: 80, veg_only: 0, collection_open: '09:00', collection_close: '20:00', reliability: 0.85 },
-  { role: 'recipient', name: 'Seva Bhojanalaya', org_name: 'Seva Bhojanalaya', email: 'seva@demo.test', phone: '+91 90000 20004', lat: 13.0035, lng: 77.5647, address: 'Malleshwaram, Bengaluru', capacity_servings: 150, veg_only: 1, collection_open: '06:00', collection_close: '21:00', reliability: 0.98 },
-  { role: 'recipient', name: 'Little Drops Orphanage', org_name: 'Little Drops', email: 'littledrops@demo.test', phone: '+91 90000 20005', lat: 12.9116, lng: 77.6389, address: 'HSR Layout, Bengaluru', capacity_servings: 60, veg_only: 0, collection_open: '08:00', collection_close: '19:00', reliability: 0.8 },
+  { role: 'recipient', name: 'Hope Foundation', org_name: 'Hope Foundation', email: 'hope@demo.test', phone: '+91 90000 20001', lat: 12.9352, lng: 77.6245, address: 'Koramangala, Bengaluru', capacity_servings: 120, veg_only: 0, accepted_categories: 'veg,nonveg', demand: 0.8, collection_open: '08:00', collection_close: '21:00', reliability: 0.95 },
+  { role: 'recipient', name: 'Annapurna Community Kitchen', org_name: 'Annapurna Kitchen', email: 'annapurna@demo.test', phone: '+91 90000 20002', lat: 12.9856, lng: 77.6051, address: 'Shivajinagar, Bengaluru', capacity_servings: 200, veg_only: 1, accepted_categories: 'veg', demand: 0.9, collection_open: '07:00', collection_close: '22:00', reliability: 0.9 },
+  { role: 'recipient', name: 'Asha Trust Shelter', org_name: 'Asha Trust', email: 'asha@demo.test', phone: '+91 90000 20003', lat: 12.9916, lng: 77.555, address: 'Rajajinagar, Bengaluru', capacity_servings: 80, veg_only: 0, accepted_categories: 'veg,nonveg', demand: 0.6, collection_open: '09:00', collection_close: '20:00', reliability: 0.85 },
+  { role: 'recipient', name: 'Seva Bhojanalaya', org_name: 'Seva Bhojanalaya', email: 'seva@demo.test', phone: '+91 90000 20004', lat: 13.0035, lng: 77.5647, address: 'Malleshwaram, Bengaluru', capacity_servings: 150, veg_only: 1, accepted_categories: 'veg', demand: 0.7, collection_open: '06:00', collection_close: '21:00', reliability: 0.98 },
+  { role: 'recipient', name: 'Little Drops Orphanage', org_name: 'Little Drops', email: 'littledrops@demo.test', phone: '+91 90000 20005', lat: 12.9116, lng: 77.6389, address: 'HSR Layout, Bengaluru', capacity_servings: 60, veg_only: 0, accepted_categories: 'veg,nonveg', demand: 0.5, collection_open: '08:00', collection_close: '19:00', reliability: 0.8 },
   // --- 4 volunteers ---
   { role: 'volunteer', name: 'Rahul Verma', email: 'rahul@demo.test', phone: '+91 90000 30001', lat: 12.9611, lng: 77.6387, address: 'Domlur, Bengaluru' },
   { role: 'volunteer', name: 'Priya Nair', email: 'priya@demo.test', phone: '+91 90000 30002', lat: 12.9767, lng: 77.5713, address: 'Majestic, Bengaluru' },
@@ -70,54 +71,25 @@ function haversineKm(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
-/** Offline deterministic score using Haversine distance (no network during seed). */
+/** Offline deterministic score using a Haversine route (no network during seed). */
 function offlineScore(listing, recipient, volunteerTravelMin = 12) {
   const distanceKm = Math.round(haversineKm(listing, recipient) * 100) / 100;
   const durationMin = Math.round((distanceKm / 25) * 60 * 10) / 10;
-  const radius = 30;
-  const W = { proximity: 35, capacity: 20, feasibility: 25, foodPreference: 10, reliability: 10 };
-  const proximity = Math.max(0, 1 - distanceKm / radius) * W.proximity;
-  let capacity = W.capacity;
-  if (recipient.capacity_servings > 0 && listing.servings > recipient.capacity_servings) {
-    const overflow = listing.servings / recipient.capacity_servings;
-    capacity = Math.max(0, W.capacity * (2 - overflow));
-  }
-  const foodPreference = recipient.veg_only && listing.food_type === 'nonveg' ? 0 : W.foodPreference;
-  const reliability = recipient.reliability * W.reliability;
-  const readyAt = new Date(listing.ready_at);
-  const pickupArrival = new Date(readyAt.getTime() + volunteerTravelMin * 60000);
-  const arrival = new Date(pickupArrival.getTime() + durationMin * 60000);
-  const beforeDeadline = pickupArrival <= new Date(listing.pickup_deadline);
-  const open = Number((recipient.collection_open || '08:00').split(':')[0]) * 60;
-  const close = Number((recipient.collection_close || '22:00').split(':')[0]) * 60;
-  const arrMin = arrival.getHours() * 60 + arrival.getMinutes();
-  const withinCollection = arrMin >= open && arrMin <= close;
-  const feasible = beforeDeadline && withinCollection;
-  const feasibility = feasible ? W.feasibility : 0;
-  const score = Math.round((proximity + capacity + foodPreference + reliability + feasibility) * 10) / 10;
-  const breakdown = {
-    proximity: Math.round(proximity * 10) / 10,
-    capacity: Math.round(capacity * 10) / 10,
-    feasibility,
-    foodPreference,
-    reliability: Math.round(reliability * 10) / 10,
-    weights: W,
+  const route = {
     distanceKm,
     durationMin,
     estimated: true,
-    volunteerTravelMin,
-    pickupBy: pickupArrival.toISOString(),
-    arrivalAt: arrival.toISOString(),
-    feasibilityReasons: feasible
-      ? []
-      : [!beforeDeadline && 'Pickup after deadline.', !withinCollection && 'Outside collection hours.'].filter(Boolean),
-    collectionHours: `${recipient.collection_open}-${recipient.collection_close}`,
-    movable: feasible,
-    score,
+    geometry: [
+      [listing.lng, listing.lat],
+      [recipient.lng, recipient.lat],
+    ],
+    geometryLatLng: [
+      [listing.lat, listing.lng],
+      [recipient.lat, recipient.lng],
+    ],
   };
-  const explanation = `${recipient.name} is ${distanceKm} km / ~${durationMin} min from the pickup point (estimated). ${
-    feasible ? 'Timings fit before the deadline and within collection hours.' : 'Timing risk on the window.'
-  } Deterministic score ${score} (0-100).`;
+  const { score, breakdown } = scoreCandidate({ listing, recipient, route, volunteerTravelMin });
+  const explanation = templateExplanation(listing, recipient, breakdown);
   return { distanceKm, durationMin, score, breakdown, explanation };
 }
 
@@ -133,11 +105,14 @@ function insertUser(u, passwordHash) {
     ]);
   } else if (u.role === 'recipient') {
     q.run(
-      `INSERT INTO recipients (user_id, org_name, address, lat, lng, capacity_servings, veg_only, collection_open, collection_close, reliability)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO recipients (user_id, org_name, address, lat, lng, capacity_servings, veg_only, accepted_categories, demand, collection_open, collection_close, reliability)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         userId, u.org_name || null, u.address || null, u.lat, u.lng,
-        u.capacity_servings || 0, u.veg_only || 0, u.collection_open || '08:00',
+        u.capacity_servings || 0, u.veg_only || 0,
+        u.accepted_categories || (u.veg_only ? 'veg' : 'veg,nonveg'),
+        u.demand ?? 0.5,
+        u.collection_open || '08:00',
         u.collection_close || '22:00', u.reliability ?? 1.0,
       ]
     );
@@ -153,15 +128,38 @@ function insertUser(u, passwordHash) {
   return q.get(`SELECT * FROM users WHERE id = ?`, [userId]);
 }
 
+function defaultHandling(storage) {
+  switch (storage) {
+    case 'hot':
+      return 'Keep hot (above 60°C) and transport in insulated containers.';
+    case 'chilled':
+      return 'Keep refrigerated below 5°C until pickup.';
+    case 'frozen':
+      return 'Keep frozen until pickup; do not refreeze.';
+    default:
+      return 'Store in a cool, dry place and consume promptly.';
+  }
+}
+
 function insertListing(row) {
+  const provider = row.provider_id
+    ? q.get(`SELECT name, phone FROM users WHERE id = ?`, [row.provider_id])
+    : null;
+  const withDefaults = {
+    handling_notes: defaultHandling(row.storage_condition),
+    contact_name: provider?.name ?? null,
+    contact_phone: provider?.phone ?? null,
+    ...row,
+  };
   const cols = [
     'provider_id', 'title', 'description', 'food_type', 'quantity_kg', 'servings',
     'prepared_at', 'ready_at', 'pickup_deadline', 'lat', 'lng', 'address',
-    'storage_condition', 'allergens', 'packaging', 'status', 'created_at',
+    'storage_condition', 'allergens', 'packaging', 'handling_notes', 'contact_name',
+    'contact_phone', 'status', 'created_at',
   ];
   const info = q.run(
     `INSERT INTO listings (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`,
-    cols.map((c) => row[c] ?? null)
+    cols.map((c) => withDefaults[c] ?? null)
   );
   return q.get(`SELECT * FROM listings WHERE id = ?`, [info.lastInsertRowid]);
 }
@@ -261,8 +259,8 @@ async function main() {
     logEvent(l3.id, 'LISTED', 'ELIGIBLE', { id: U('nandini@demo.test'), role: 'provider' }, res.summary);
     setListingStatus(l3.id, 'ELIGIBLE', 'OFFERED', 'Offered to top 3 matches');
     addOffer(l3, user('hope@demo.test'), 'OFFERED', 1);
-    addOffer(l3, user('littledrops@demo.test'), 'OFFERED', 2);
-    addOffer(l3, user('seva@demo.test'), 'OFFERED', 3);
+    addOffer(l3, user('seva@demo.test'), 'OFFERED', 2);
+    addOffer(l3, user('littledrops@demo.test'), 'OFFERED', 3);
     notify(U('hope@demo.test'), 'recipient', 'New surplus match', 'Assorted Pastries — accept in your inbox.', l3.id);
     notify(U('littledrops@demo.test'), 'recipient', 'New surplus match', 'Assorted Pastries — accept in your inbox.', l3.id);
   }
