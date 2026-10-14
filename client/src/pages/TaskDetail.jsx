@@ -87,9 +87,22 @@ export default function TaskDetail() {
     }
   }, [id, isProvider]);
 
+  const refreshAssignment = useCallback(async () => {
+    try {
+      const d = await api.get(`/assignments/${id}`);
+      setTask(d.assignment);
+    } catch {
+      // Keep the last successful assignment state visible during brief network failures.
+    }
+  }, [id]);
+
   useEffect(() => {
     load();
-  }, [load]);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') refreshAssignment();
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [load, refreshAssignment]);
 
   const run = async (name, fn) => {
     setBusy(name);

@@ -1,14 +1,20 @@
 import { Router } from 'express';
-import { q } from '../db.js';
+import { db, q } from '../db.js';
 import { config } from '../config.js';
 import { authRequired, requireRole } from '../auth.js';
-import { logEvent, transition } from '../services/workflow.js';
+import { logEvent, notify, transition } from '../services/workflow.js';
 import { routeInfo } from '../services/geo.js';
 import {
+  acceptOffer,
   applyValidation,
+  cascadeOffers,
+  declineOffer,
+  latestValidation,
   refreshMatching,
+  serializeAssignment,
   serializeListing,
 } from '../services/listings.js';
+import { inviteVolunteers } from '../services/volunteerAssignment.js';
 
 const router = Router();
 router.use(authRequired);
@@ -42,7 +48,11 @@ router.get('/', (req, res) => {
     clauses.push('provider_id = ?');
     params.push(req.user.id);
   } else if (req.user.role === 'recipient') {
-    clauses.push(`status IN ('ELIGIBLE','OFFERED','NO_MATCH','AT_RISK')`);
+    clauses.push(
+      `provider_id != ? AND status IN ('ELIGIBLE','OFFERED','NO_MATCH','AT_RISK')
+       AND datetime(pickup_deadline) > datetime('now')`
+    );
+    params.push(req.user.id);
   }
   if (status) {
     clauses.push('status = ?');
@@ -91,6 +101,128 @@ router.get('/:id', (req, res) => {
   }
 
   res.json({ listing: serializeListing(listing, req.user, { offers, events }) });
+});
+
+router.post('/:id/respond', requireRole('recipient'), async (req, res, next) => {
+  try {
+    const { action } = req.body || {};
+    if (!['accept', 'decline'].includes(action)) {
+      return res.status(400).json({ error: 'Action must be accept or decline' });
+    }
+
+    const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [req.params.id]);
+    if (!listing) return res.status(404).json({ error: 'Listing not found' });
+    if (listing.provider_id === req.user.id) {
+      return res.status(403).json({ error: 'You cannot respond to your own listing' });
+    }
+    if (!Number.isFinite(Date.parse(listing.pickup_deadline)) || Date.parse(listing.pickup_deadline) <= Date.now()) {
+      return res.status(409).json({ error: 'Pickup deadline has passed; this listing is no longer available' });
+    }
+    if (!latestValidation(listing.id)?.eligible) {
+      return res.status(409).json({ error: 'Only validated listings can be accepted or declined' });
+    }
+
+    const availableStatuses = ['ELIGIBLE', 'OFFERED', 'NO_MATCH', 'AT_RISK'];
+    if (!availableStatuses.includes(listing.status)) {
+      return res.status(409).json({ error: `Listing is ${listing.status} and is no longer available` });
+    }
+
+    let offer = q.get(`SELECT * FROM offers WHERE listing_id = ? AND recipient_id = ?`, [
+      listing.id,
+      req.user.id,
+    ]);
+
+    if (action === 'decline') {
+      if (offer?.status === 'ACCEPTED' || offer?.status === 'DECLINED') {
+        return res.status(409).json({ error: `Offer is already ${offer.status.toLowerCase()}` });
+      }
+      if (offer?.status === 'OFFERED') {
+        const { listing: declinedListing } = declineOffer(offer, req.user, req.user);
+        const result = await cascadeOffers(declinedListing, req.user);
+        return res.json({ declined: true, noMatch: result.noMatch });
+      }
+
+      if (offer?.status === 'CANDIDATE') {
+        q.run(`UPDATE offers SET status = 'DECLINED', updated_at = datetime('now') WHERE id = ?`, [
+          offer.id,
+        ]);
+      } else {
+        const rank = q.get(
+          `SELECT COALESCE(MAX(rank), 0) + 1 AS rank FROM offers WHERE listing_id = ?`,
+          [listing.id]
+        ).rank;
+        q.run(
+          `INSERT INTO offers (listing_id, recipient_id, score, breakdown_json, explanation, rank, status)
+           VALUES (?, ?, 0, '{}', 'Declined from available surplus', ?, 'DECLINED')`,
+          [listing.id, req.user.id, rank]
+        );
+      }
+      notify(
+        listing.provider_id,
+        'provider',
+        `Donation #${listing.id} declined`,
+        `${req.user.name} declined from available surplus.`,
+        listing.id
+      );
+      const result = await cascadeOffers(listing, req.user);
+      return res.json({ declined: true, noMatch: result.noMatch });
+    }
+
+    const accepted = db.transaction(() => {
+      const current = q.get(`SELECT * FROM listings WHERE id = ?`, [listing.id]);
+      if (!current || !availableStatuses.includes(current.status)) {
+        const error = new Error(`Listing is ${current?.status || 'missing'} and is no longer available`);
+        error.status = 409;
+        throw error;
+      }
+      if (!Number.isFinite(Date.parse(current.pickup_deadline)) || Date.parse(current.pickup_deadline) <= Date.now()) {
+        const error = new Error('Pickup deadline has passed; this listing is no longer available');
+        error.status = 409;
+        throw error;
+      }
+      const currentOffer = q.get(`SELECT * FROM offers WHERE listing_id = ? AND recipient_id = ?`, [
+        current.id,
+        req.user.id,
+      ]);
+      if (currentOffer?.status === 'ACCEPTED' || currentOffer?.status === 'DECLINED') {
+        const error = new Error(`Offer is already ${currentOffer.status.toLowerCase()}`);
+        error.status = 409;
+        throw error;
+      }
+
+      if (current.status !== 'OFFERED' && current.status !== 'AT_RISK') {
+        transition(current.id, 'OFFERED', req.user, 'Recipient accepted from available surplus');
+      }
+      if (currentOffer?.status === 'CANDIDATE') {
+        q.run(`UPDATE offers SET status = 'OFFERED', updated_at = datetime('now') WHERE id = ?`, [
+          currentOffer.id,
+        ]);
+      } else if (!currentOffer) {
+        const rank = q.get(
+          `SELECT COALESCE(MAX(rank), 0) + 1 AS rank FROM offers WHERE listing_id = ?`,
+          [current.id]
+        ).rank;
+        q.run(
+          `INSERT INTO offers (listing_id, recipient_id, score, breakdown_json, explanation, rank, status)
+           VALUES (?, ?, 0, '{}', 'Accepted from available surplus', ?, 'OFFERED')`,
+          [current.id, req.user.id, rank]
+        );
+      }
+      offer = q.get(`SELECT * FROM offers WHERE listing_id = ? AND recipient_id = ?`, [
+        current.id,
+        req.user.id,
+      ]);
+      return acceptOffer(offer, req.user, req.user);
+    })();
+
+    const invitations = await inviteVolunteers(accepted.assignment, req.user);
+    res.json({
+      assignment: serializeAssignment(accepted.assignment, req.user),
+      invitedVolunteers: invitations.filter((invitation) => invitation.status === 'OFFERED').length,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.post('/', requireRole('provider'), async (req, res, next) => {

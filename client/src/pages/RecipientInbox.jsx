@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Check, Clock, MapPin, Package, Snowflake, Timer, TriangleAlert, X } from 'lucide-react';
 import { api } from '../lib/api.js';
+import { useAuth } from '../lib/auth.jsx';
 import { EmptyState, ErrorNote, SafetyDisclaimer, Spinner, StatusBadge } from '../components/ui.jsx';
 import { fmtDateTime, fmtTime, fromNow, num } from '../lib/format.js';
 
@@ -51,27 +52,48 @@ function Detail({ icon: Icon, label, children }) {
 }
 
 export default function RecipientInbox() {
+  const { user } = useAuth();
+  const isRecipient = user?.role === 'recipient';
   const [offers, setOffers] = useState(null);
   const [listings, setListings] = useState(null);
   const [busy, setBusy] = useState(null);
   const [confirming, setConfirming] = useState(null);
   const [notice, setNotice] = useState(null);
   const [error, setError] = useState('');
+  const requestId = useRef(0);
 
   const load = useCallback(() => {
+    if (!isRecipient) return;
+    const currentRequest = ++requestId.current;
+    setError('');
     Promise.all([api.get('/offers'), api.get('/listings')])
       .then(([offerData, listingData]) => {
+        if (currentRequest !== requestId.current) return;
         const currentOffers = offerData.offers || [];
         const offerListingIds = new Set(currentOffers.map((offer) => offer.listing?.id));
         setOffers(currentOffers);
         setListings((listingData.listings || []).filter((listing) => !offerListingIds.has(listing.id)));
       })
-      .catch((e) => setError(e.message));
-  }, []);
+      .catch((e) => {
+        if (currentRequest === requestId.current) setError(e.message);
+      });
+  }, [isRecipient]);
 
   useEffect(() => {
+    requestId.current += 1;
+    setOffers(null);
+    setListings(null);
+    setError('');
+    if (!isRecipient) return;
     load();
-  }, [load]);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') load();
+    }, 5000);
+    return () => {
+      requestId.current += 1;
+      window.clearInterval(interval);
+    };
+  }, [isRecipient, load]);
 
   const accept = async (o) => {
     setBusy(`${o.id}-accept`);
@@ -120,6 +142,43 @@ export default function RecipientInbox() {
     }
   };
 
+  const respondToListing = async (listing, action) => {
+    const busyKey = `listing-${listing.id}-${action}`;
+    setBusy(busyKey);
+    setError('');
+    setNotice(null);
+    setConfirming(null);
+    try {
+      const result = await api.post(`/listings/${listing.id}/respond`, { action });
+      setNotice(
+        action === 'accept'
+          ? {
+              kind: 'ok',
+              text: result.invitedVolunteers
+                ? `Accepted. The provider was notified and ${result.invitedVolunteers} volunteer(s) invited.`
+                : 'Accepted. The provider was notified; no volunteers are available to invite yet.',
+              link: '/recipient',
+              linkText: 'View my deliveries',
+            }
+          : {
+              kind: result.noMatch ? 'warn' : 'ok',
+              text: result.noMatch
+                ? 'Declined. The provider was notified; no other recipient could take it.'
+                : 'Declined. The provider was notified and the listing remains available to others.',
+            }
+      );
+      load();
+    } catch (e) {
+      setError(e.message);
+      load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!isRecipient) {
+    return <div className="card p-4 text-sm text-navy-700">Switch active role to Recipient to view offers and available surplus.</div>;
+  }
   if (error && !offers) return <div className="card p-4 text-red-700">{error}</div>;
   if (!offers || !listings) return <Spinner />;
 
@@ -270,25 +329,65 @@ export default function RecipientInbox() {
         {listings.length === 0 && (
           <EmptyState title="No available surplus" hint="New eligible listings will appear here." />
         )}
-        {listings.map((listing) => (
-          <Link key={listing.id} to={`/listings/${listing.id}`} className="card block p-4 transition hover:border-brand">
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <h3 className="font-semibold text-navy-800">{listing.title}</h3>
-                <p className="mt-1 text-sm text-navy-600">
-                  {listing.provider?.org_name || listing.provider?.name} · {listing.address || 'Pickup location'}
-                </p>
-                <p className="mt-1 text-xs capitalize text-navy-600">
-                  {listing.food_type} · {num(listing.quantity_kg)} kg · {listing.servings} servings
-                </p>
+        {listings.map((listing) => {
+          const acceptKey = `listing-${listing.id}-accept`;
+          const declineKey = `listing-${listing.id}-decline`;
+          const confirmKey = `listing-${listing.id}`;
+          const isBusy = busy === acceptKey || busy === declineKey;
+          return (
+            <div key={listing.id} className="card p-4 transition hover:border-brand">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h3 className="font-semibold text-navy-800">{listing.title}</h3>
+                  <p className="mt-1 text-sm text-navy-600">
+                    {listing.provider?.org_name || listing.provider?.name} · {listing.address || 'Pickup location'}
+                  </p>
+                  <p className="mt-1 text-xs capitalize text-navy-600">
+                    {listing.food_type} · {num(listing.quantity_kg)} kg · {listing.servings} servings
+                  </p>
+                </div>
+                <div className="text-right text-xs text-navy-600">
+                  <StatusBadge status={listing.status} />
+                  <div className="mt-1">Pickup by {fmtDateTime(listing.pickup_deadline)}</div>
+                </div>
               </div>
-              <div className="text-right text-xs text-navy-600">
-                <StatusBadge status={listing.status} />
-                <div className="mt-1">Pickup by {fmtDateTime(listing.pickup_deadline)}</div>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <Link to={`/listings/${listing.id}`} className="btn-ghost">View listing</Link>
+                <button
+                  className="btn-green"
+                  disabled={isBusy}
+                  onClick={() => respondToListing(listing, 'accept')}
+                >
+                  <Check className="h-4 w-4" />
+                  {busy === acceptKey ? 'Accepting…' : 'Accept'}
+                </button>
+                {confirming === confirmKey ? (
+                  <>
+                    <span className="text-xs text-navy-600">Decline this listing?</span>
+                    <button
+                      className="btn-ghost text-red-700"
+                      disabled={isBusy}
+                      onClick={() => respondToListing(listing, 'decline')}
+                    >
+                      {busy === declineKey ? 'Declining…' : 'Confirm decline'}
+                    </button>
+                    <button className="btn-ghost" disabled={isBusy} onClick={() => setConfirming(null)}>
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="btn-ghost"
+                    disabled={isBusy}
+                    onClick={() => setConfirming(confirmKey)}
+                  >
+                    <X className="h-4 w-4" /> Decline
+                  </button>
+                )}
               </div>
             </div>
-          </Link>
-        ))}
+          );
+        })}
       </section>
 
       {rest.length > 0 && (

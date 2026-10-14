@@ -4,7 +4,7 @@ import { AlertTriangle, CheckCircle2, Clock, Package, PlusCircle } from 'lucide-
 import { api } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 import { StatusBadge, SafetyDisclaimer, Spinner, EmptyState } from '../components/ui.jsx';
-import { fmtDateTime, fromNow, num } from '../lib/format.js';
+import { fmtDateTime, num } from '../lib/format.js';
 
 function Stat({ icon: Icon, label, value, tone = 'navy' }) {
   const tones = {
@@ -26,16 +26,60 @@ function Stat({ icon: Icon, label, value, tone = 'navy' }) {
   );
 }
 
+function ListingRow({ listing }) {
+  return (
+    <Link to={`/listings/${listing.id}`} className="card block p-4 transition hover:border-brand">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h3 className="truncate font-semibold text-navy-800">{listing.title}</h3>
+            <StatusBadge status={listing.status} />
+          </div>
+          <p className="mt-1 line-clamp-1 text-sm text-navy-600">{listing.description}</p>
+          <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-navy-600">
+            <span className="capitalize">{listing.food_type}</span>
+            <span>{num(listing.quantity_kg)} kg · {listing.servings} servings</span>
+            <span>Pickup by {fmtDateTime(listing.pickup_deadline)}</span>
+          </div>
+        </div>
+        <span className="text-xs text-navy-500">#{listing.id}</span>
+      </div>
+      {listing.validation?.flags?.length > 0 && (
+        <p className="mt-2 text-xs text-amber-700">
+          {listing.validation.flags.length} validation note(s) — open to review, fix and resubmit.
+        </p>
+      )}
+    </Link>
+  );
+}
+
 export default function ProviderDashboard() {
   const { user } = useAuth();
   const [listings, setListings] = useState(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api
-      .get('/listings')
-      .then((d) => setListings(d.listings))
-      .catch((e) => setError(e.message));
+    let active = true;
+    const load = (showError = false) => {
+      api
+        .get('/listings')
+        .then((d) => {
+          if (!active) return;
+          setListings(d.listings);
+          setError('');
+        })
+        .catch((e) => {
+          if (active && showError) setError(e.message);
+        });
+    };
+    load(true);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') load();
+    }, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
   }, []);
 
   const stats = useMemo(() => {
@@ -48,6 +92,13 @@ export default function ProviderDashboard() {
       kgDelivered: l.filter((x) => x.status === 'DELIVERED').reduce((s, x) => s + (x.quantity_kg || 0), 0),
     };
   }, [listings]);
+
+  const history = (listings || [])
+    .filter((listing) => ['DELIVERED', 'EXPIRED', 'NO_MATCH', 'DECLINED'].includes(listing.status))
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+  const current = (listings || []).filter(
+    (listing) => !['DELIVERED', 'EXPIRED', 'NO_MATCH', 'DECLINED'].includes(listing.status)
+  );
 
   if (error) return <div className="card p-4 text-red-700">{error}</div>;
   if (!listings) return <Spinner />;
@@ -74,32 +125,15 @@ export default function ProviderDashboard() {
       </div>
 
       <div className="space-y-3">
-        <h2 className="font-semibold text-navy-800">Your listings</h2>
-        {listings.length === 0 && <EmptyState title="No listings yet" hint="Create your first surplus food listing." />}
-        {listings.map((l) => (
-          <Link key={l.id} to={`/listings/${l.id}`} className="card block p-4 transition hover:border-brand">
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h3 className="truncate font-semibold text-navy-800">{l.title}</h3>
-                  <StatusBadge status={l.status} />
-                </div>
-                <p className="mt-1 line-clamp-1 text-sm text-navy-600">{l.description}</p>
-                <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-navy-600">
-                  <span className="capitalize">{l.food_type}</span>
-                  <span>{num(l.quantity_kg)} kg · {l.servings} servings</span>
-                  <span>Pickup by {fmtDateTime(l.pickup_deadline)} ({fromNow(l.pickup_deadline)})</span>
-                </div>
-              </div>
-              <span className="text-xs text-navy-500">#{l.id}</span>
-            </div>
-            {l.validation?.flags?.length > 0 && (
-              <p className="mt-2 text-xs text-amber-700">
-                {l.validation.flags.length} validation note(s) — open to review, fix and resubmit.
-              </p>
-            )}
-          </Link>
-        ))}
+        <h2 className="font-semibold text-navy-800">Current listings</h2>
+        {current.length === 0 && <EmptyState title="No current listings" hint="Create a listing to offer surplus food." />}
+        {current.map((listing) => <ListingRow key={listing.id} listing={listing} />)}
+      </div>
+
+      <div className="space-y-3">
+        <h2 className="font-semibold text-navy-800">Listing history</h2>
+        {history.length === 0 && <EmptyState title="No listing history" hint="Delivered, expired and unmatched listings will appear here." />}
+        {history.map((listing) => <ListingRow key={listing.id} listing={listing} />)}
       </div>
     </div>
   );

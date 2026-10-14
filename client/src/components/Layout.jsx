@@ -40,12 +40,19 @@ function NotificationBell() {
   const [count, setCount] = useState(0);
   useEffect(() => {
     let alive = true;
-    api
-      .get('/notifications')
-      .then((d) => alive && setCount((d.notifications || []).filter((n) => !n.read).length))
-      .catch(() => {});
+    const load = () => {
+      api
+        .get('/notifications')
+        .then((d) => alive && setCount((d.notifications || []).filter((n) => !n.read).length))
+        .catch(() => {});
+    };
+    load();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') load();
+    }, 5000);
     return () => {
       alive = false;
+      window.clearInterval(interval);
     };
   }, []);
   return (

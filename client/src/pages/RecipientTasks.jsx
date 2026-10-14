@@ -8,7 +8,27 @@ export default function RecipientTasks() {
   const [tasks, setTasks] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => {
-    api.get('/assignments').then((d) => setTasks(d.assignments)).catch((e) => setError(e.message));
+    let active = true;
+    const load = (showError = false) => {
+      api
+        .get('/assignments')
+        .then((d) => {
+          if (!active) return;
+          setTasks(d.assignments);
+          setError('');
+        })
+        .catch((e) => {
+          if (active && showError) setError(e.message);
+        });
+    };
+    load(true);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') load();
+    }, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
   }, []);
 
   if (error) return <div className="card p-4 text-red-700">{error}</div>;

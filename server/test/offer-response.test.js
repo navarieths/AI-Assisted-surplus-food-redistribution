@@ -48,6 +48,19 @@ function createOffer(title) {
   return { listingId: Number(listing.lastInsertRowid), offerId: Number(offer.lastInsertRowid) };
 }
 
+function createAvailableListing(title, status, pickupDeadline = new Date(Date.now() + 4 * 3600000).toISOString()) {
+  const listing = q.run(
+    `INSERT INTO listings (provider_id, title, ready_at, pickup_deadline, lat, lng, status)
+     VALUES (?, ?, datetime('now'), ?, 12.95, 77.60, ?)`,
+    [provider.id, title, pickupDeadline, status]
+  );
+  q.run(
+    `INSERT INTO validation_results (listing_id, eligible, flags_json) VALUES (?, 1, '[]')`,
+    [listing.lastInsertRowid]
+  );
+  return Number(listing.lastInsertRowid);
+}
+
 const server = app.listen(0);
 await new Promise((resolve) => server.once('listening', resolve));
 const baseUrl = `http://127.0.0.1:${server.address().port}/api`;
@@ -98,6 +111,26 @@ test('accept invites volunteers and decline notifies provider', async () => {
   const { invitations } = await volunteerInbox.json();
   assert.ok(invitations.some((row) => row.assignment_id === assignment.id));
 
+  const claimResponse = await fetch(`${baseUrl}/assignments/${assignment.id}/claim`, {
+    method: 'POST',
+    headers: headersFor(volunteer),
+  });
+  assert.equal(claimResponse.status, 200);
+  const claimed = await claimResponse.json();
+  assert.equal(claimed.assignment.volunteer_id, volunteer.id);
+  assert.equal(
+    q.get(`SELECT status FROM listings WHERE id = ?`, [accepted.listingId]).status,
+    'VOLUNTEER_ASSIGNED'
+  );
+  for (const user of [provider, recipient]) {
+    assert.ok(
+      q.get(
+        `SELECT id FROM notifications WHERE user_id = ? AND subject = ?`,
+        [user.id, `Volunteer assigned to #${accepted.listingId}`]
+      )
+    );
+  }
+
   const declined = createOffer('Declined surplus');
   const declineResponse = await fetch(`${baseUrl}/offers/${declined.offerId}/decline`, {
     method: 'POST',
@@ -110,4 +143,78 @@ test('accept invites volunteers and decline notifies provider', async () => {
       [provider.id, `Donation #${declined.listingId} declined`]
     )
   );
+});
+
+test('recipient can accept or decline available surplus listings', async () => {
+  const acceptedListingId = createAvailableListing('Browse accept', 'NO_MATCH');
+  const acceptResponse = await fetch(`${baseUrl}/listings/${acceptedListingId}/respond`, {
+    method: 'POST',
+    headers: { ...headersFor(recipient), 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'accept' }),
+  });
+  assert.equal(acceptResponse.status, 200);
+  const accepted = await acceptResponse.json();
+  assert.equal(accepted.assignment.listing_id, acceptedListingId);
+  assert.equal(accepted.invitedVolunteers, 1);
+  assert.equal(
+    q.get(`SELECT status FROM listings WHERE id = ?`, [acceptedListingId]).status,
+    'ACCEPTED'
+  );
+  assert.ok(
+    q.get(
+      `SELECT id FROM notifications WHERE user_id = ? AND subject = ?`,
+      [provider.id, `Donation #${acceptedListingId} accepted`]
+    )
+  );
+
+  const declinedListingId = createAvailableListing('Browse decline', 'ELIGIBLE');
+  const declineResponse = await fetch(`${baseUrl}/listings/${declinedListingId}/respond`, {
+    method: 'POST',
+    headers: { ...headersFor(recipient), 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'decline' }),
+  });
+  assert.equal(declineResponse.status, 200);
+  assert.equal((await declineResponse.json()).noMatch, true);
+  assert.equal(
+    q.get(`SELECT status FROM offers WHERE listing_id = ? AND recipient_id = ?`, [
+      declinedListingId,
+      recipient.id,
+    ]).status,
+    'DECLINED'
+  );
+  assert.ok(
+    q.get(
+      `SELECT id FROM notifications WHERE user_id = ? AND subject = ?`,
+      [provider.id, `Donation #${declinedListingId} declined`]
+    )
+  );
+});
+
+test('available surplus excludes own and past-deadline listings', async () => {
+  const ownListingId = createAvailableListing('Own surplus', 'ELIGIBLE');
+  const ownAsRecipient = { ...provider, role: 'recipient' };
+  const ownFeedResponse = await fetch(`${baseUrl}/listings`, {
+    headers: headersFor(ownAsRecipient),
+  });
+  assert.equal(ownFeedResponse.status, 200);
+  const ownFeed = await ownFeedResponse.json();
+  assert.ok(!ownFeed.listings.some((listing) => listing.id === ownListingId));
+
+  const expiredListingId = createAvailableListing(
+    'Expired surplus',
+    'NO_MATCH',
+    new Date(Date.now() - 3600000).toISOString()
+  );
+  const feedResponse = await fetch(`${baseUrl}/listings`, {
+    headers: headersFor(recipient),
+  });
+  const feed = await feedResponse.json();
+  assert.ok(!feed.listings.some((listing) => listing.id === expiredListingId));
+
+  const response = await fetch(`${baseUrl}/listings/${expiredListingId}/respond`, {
+    method: 'POST',
+    headers: { ...headersFor(recipient), 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'accept' }),
+  });
+  assert.equal(response.status, 409);
 });
