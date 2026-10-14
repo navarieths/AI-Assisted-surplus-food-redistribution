@@ -131,6 +131,31 @@ test('accept invites volunteers and decline notifies provider', async () => {
     );
   }
 
+  q.run(
+    `UPDATE assignments SET status = 'IN_TRANSIT', pickup_verified_at = datetime('now') WHERE id = ?`,
+    [assignment.id]
+  );
+  q.run(`UPDATE listings SET status = 'IN_TRANSIT' WHERE id = ?`, [accepted.listingId]);
+  const deliveredResponse = await fetch(
+    `${baseUrl}/assignments/${assignment.id}/confirm-delivery`,
+    { method: 'POST', headers: headersFor(recipient) }
+  );
+  assert.equal(deliveredResponse.status, 200);
+  assert.equal(
+    q.get(`SELECT status FROM listings WHERE id = ?`, [accepted.listingId]).status,
+    'DELIVERED'
+  );
+  assert.equal(
+    q.get(`SELECT status FROM assignments WHERE id = ?`, [assignment.id]).status,
+    'DELIVERED'
+  );
+  assert.ok(
+    q.get(
+      `SELECT id FROM notifications WHERE user_id = ? AND subject = ?`,
+      [provider.id, `Donation #${accepted.listingId} delivered`]
+    )
+  );
+
   const declined = createOffer('Declined surplus');
   const declineResponse = await fetch(`${baseUrl}/offers/${declined.offerId}/decline`, {
     method: 'POST',
