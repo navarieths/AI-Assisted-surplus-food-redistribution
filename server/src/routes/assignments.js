@@ -437,14 +437,17 @@ router.get('/:id/track', async (req, res, next) => {
     );
 
     const pickupPoint = { lat: listing.lat, lng: listing.lng };
-    const dropPoint = { lat: recipient.lat, lng: recipient.lng };
+    const hasDropLocation = Number.isFinite(recipient?.lat) && Number.isFinite(recipient?.lng);
+    const dropPoint = hasDropLocation ? { lat: recipient.lat, lng: recipient.lng } : null;
     const pickedUp = Boolean(assignment.pickup_verified_at) || ['IN_TRANSIT'].includes(listing.status);
     const volPoint = latest ? { lat: latest.lat, lng: latest.lng } : null;
 
-    let route;
-    if (pickedUp && volPoint) route = await routeVia(volPoint, null, dropPoint);
-    else if (volPoint) route = await routeVia(volPoint, pickupPoint, dropPoint);
-    else route = await routeVia(pickupPoint, null, dropPoint);
+    let route = null;
+    if (dropPoint) {
+      if (pickedUp && volPoint) route = await routeVia(volPoint, null, dropPoint);
+      else if (volPoint) route = await routeVia(volPoint, pickupPoint, dropPoint);
+      else route = await routeVia(pickupPoint, null, dropPoint);
+    }
 
     res.json({
       assignmentId: assignment.id,
@@ -452,15 +455,24 @@ router.get('/:id/track', async (req, res, next) => {
       listingStatus: listing.status,
       pickedUp,
       pickup: { ...pickupPoint, label: listing.address, title: listing.title },
-      drop: { ...dropPoint, label: recipient.address, title: recipient.org_name || recipient.name },
+      drop: {
+        lat: dropPoint?.lat ?? null,
+        lng: dropPoint?.lng ?? null,
+        label: recipient.address,
+        title: recipient.org_name || recipient.name,
+      },
       volunteer: volPoint
         ? { ...volPoint, updatedAt: latest.recorded_at, name: (q.get(`SELECT name FROM users WHERE id = ?`, [latest.volunteer_id]) || {}).name }
         : null,
-      distanceKm: route.distanceKm,
-      durationMin: route.durationMin,
-      estimated: route.estimated,
-      geometry: route.geometryLatLng,
-      googleMapsUrl: `https://www.google.com/maps/dir/?api=1&origin=${pickupPoint.lat},${pickupPoint.lng}&destination=${dropPoint.lat},${dropPoint.lng}&travelmode=driving`,
+      distanceKm: route?.distanceKm ?? null,
+      durationMin: route?.durationMin ?? null,
+      estimated: route?.estimated ?? true,
+      geometry: (route?.geometryLatLng || []).filter(
+        (point) => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1])
+      ),
+      googleMapsUrl: dropPoint
+        ? `https://www.google.com/maps/dir/?api=1&origin=${pickupPoint.lat},${pickupPoint.lng}&destination=${dropPoint.lat},${dropPoint.lng}&travelmode=driving`
+        : null,
     });
   } catch (err) {
     next(err);

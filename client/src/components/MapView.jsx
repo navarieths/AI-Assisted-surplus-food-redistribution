@@ -28,7 +28,11 @@ export function MapView({
 }) {
   const mapConfig = useMapConfig();
   const routes = polylines.length ? polylines : polyline.length > 1 ? [polyline] : [];
-  const allPoints = [...markers.map((m) => [m.lat, m.lng]), ...routes.flat()];
+  const validMarkers = markers.filter((marker) => Number.isFinite(marker?.lat) && Number.isFinite(marker?.lng));
+  const validRoutes = routes
+    .map((route) => route.filter((point) => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1])))
+    .filter((route) => route.length > 1);
+  const allPoints = [...validMarkers.map((marker) => [marker.lat, marker.lng]), ...validRoutes.flat()];
   return (
     <div className="overflow-hidden rounded-xl border border-navy-100" style={{ height }}>
       <MapContainer center={center} zoom={zoom} style={{ height: '100%', width: '100%' }} scrollWheelZoom>
@@ -36,14 +40,14 @@ export function MapView({
           <TileLayer url={mapConfig.tileUrl} attribution={mapConfig.attribution} maxZoom={mapConfig.maxZoom || 19} />
         )}
         {fit && <Fit points={allPoints} />}
-        {routes.map((pts, i) => (
+        {validRoutes.map((pts, i) => (
           <Polyline
             key={`route-${i}`}
             positions={pts}
             pathOptions={{ color: colors[i % colors.length], weight: 4, opacity: 0.8 }}
           />
         ))}
-        {markers.map((m, i) => (
+        {validMarkers.map((m, i) => (
           <Marker key={`${m.lat}-${m.lng}-${i}`} position={[m.lat, m.lng]} icon={m.icon}>
             {(m.title || m.label) && (
               <Popup>

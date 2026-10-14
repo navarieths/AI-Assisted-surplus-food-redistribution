@@ -218,3 +218,30 @@ test('available surplus excludes own and past-deadline listings', async () => {
   });
   assert.equal(response.status, 409);
 });
+
+test('tracking omits route values when the recipient has no location', async () => {
+  const recipientWithoutLocation = createUser('recipient', 'no-location@response.test');
+  const listing = q.run(
+    `INSERT INTO listings (provider_id, title, ready_at, pickup_deadline, lat, lng, status)
+     VALUES (?, 'Missing drop location', datetime('now'), datetime('now','+4 hours'), 12.95, 77.60,
+       'VOLUNTEER_ASSIGNED')`,
+    [provider.id]
+  );
+  const assignment = q.run(
+    `INSERT INTO assignments (listing_id, recipient_id, volunteer_id, status)
+     VALUES (?, ?, ?, 'ASSIGNED')`,
+    [listing.lastInsertRowid, recipientWithoutLocation.id, volunteer.id]
+  );
+  const response = await fetch(`${baseUrl}/assignments/${assignment.lastInsertRowid}/track`, {
+    headers: headersFor(provider),
+  });
+
+  assert.equal(response.status, 200);
+  const tracking = await response.json();
+  assert.equal(tracking.drop.lat, null);
+  assert.equal(tracking.drop.lng, null);
+  assert.equal(tracking.distanceKm, null);
+  assert.equal(tracking.durationMin, null);
+  assert.deepEqual(tracking.geometry, []);
+  assert.equal(tracking.googleMapsUrl, null);
+});

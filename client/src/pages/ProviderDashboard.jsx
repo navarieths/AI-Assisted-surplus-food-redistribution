@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, Clock, Package, PlusCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Clock, Package, PlusCircle, Truck } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
 import { StatusBadge, SafetyDisclaimer, Spinner, EmptyState } from '../components/ui.jsx';
@@ -26,13 +26,15 @@ function Stat({ icon: Icon, label, value, tone = 'navy' }) {
   );
 }
 
-function ListingRow({ listing }) {
+function ListingRow({ listing, assignment }) {
   return (
-    <Link to={`/listings/${listing.id}`} className="card block p-4 transition hover:border-brand">
+    <div className="card p-4 transition hover:border-brand">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <h3 className="truncate font-semibold text-navy-800">{listing.title}</h3>
+            <Link to={`/listings/${listing.id}`} className="truncate font-semibold text-navy-800 hover:underline">
+              {listing.title}
+            </Link>
             <StatusBadge status={listing.status} />
           </div>
           <p className="mt-1 line-clamp-1 text-sm text-navy-600">{listing.description}</p>
@@ -44,28 +46,35 @@ function ListingRow({ listing }) {
         </div>
         <span className="text-xs text-navy-500">#{listing.id}</span>
       </div>
+      {assignment && (
+        <Link to={`/tasks/${assignment.id}`} className="btn-ghost mt-3">
+          <Truck className="h-4 w-4" />
+          {assignment.status === 'DELIVERED' ? 'View delivery' : 'Track volunteer'}
+        </Link>
+      )}
       {listing.validation?.flags?.length > 0 && (
         <p className="mt-2 text-xs text-amber-700">
           {listing.validation.flags.length} validation note(s) — open to review, fix and resubmit.
         </p>
       )}
-    </Link>
+    </div>
   );
 }
 
 export default function ProviderDashboard() {
   const { user } = useAuth();
   const [listings, setListings] = useState(null);
+  const [assignments, setAssignments] = useState([]);
   const [error, setError] = useState('');
 
   useEffect(() => {
     let active = true;
     const load = (showError = false) => {
-      api
-        .get('/listings')
-        .then((d) => {
+      Promise.all([api.get('/listings'), api.get('/assignments')])
+        .then(([listingData, assignmentData]) => {
           if (!active) return;
-          setListings(d.listings);
+          setListings(listingData.listings);
+          setAssignments(assignmentData.assignments || []);
           setError('');
         })
         .catch((e) => {
@@ -99,6 +108,7 @@ export default function ProviderDashboard() {
   const current = (listings || []).filter(
     (listing) => !['DELIVERED', 'EXPIRED', 'NO_MATCH', 'DECLINED'].includes(listing.status)
   );
+  const assignmentsByListing = new Map(assignments.map((assignment) => [assignment.listing_id, assignment]));
 
   if (error) return <div className="card p-4 text-red-700">{error}</div>;
   if (!listings) return <Spinner />;
@@ -127,13 +137,17 @@ export default function ProviderDashboard() {
       <div className="space-y-3">
         <h2 className="font-semibold text-navy-800">Current listings</h2>
         {current.length === 0 && <EmptyState title="No current listings" hint="Create a listing to offer surplus food." />}
-        {current.map((listing) => <ListingRow key={listing.id} listing={listing} />)}
+        {current.map((listing) => (
+          <ListingRow key={listing.id} listing={listing} assignment={assignmentsByListing.get(listing.id)} />
+        ))}
       </div>
 
       <div className="space-y-3">
         <h2 className="font-semibold text-navy-800">Listing history</h2>
         {history.length === 0 && <EmptyState title="No listing history" hint="Delivered, expired and unmatched listings will appear here." />}
-        {history.map((listing) => <ListingRow key={listing.id} listing={listing} />)}
+        {history.map((listing) => (
+          <ListingRow key={listing.id} listing={listing} assignment={assignmentsByListing.get(listing.id)} />
+        ))}
       </div>
     </div>
   );

@@ -66,23 +66,33 @@ export default function TaskMap({ taskId, height = 340, pollMs = 5000, canSimula
     markers.push({ ...data.volunteer, icon: volunteerIcon, title: `Volunteer ${data.volunteer.name || ''}` });
   }
 
+  const hasDropLocation = Number.isFinite(data.drop?.lat) && Number.isFinite(data.drop?.lng);
   const delivered = data.listingStatus === 'DELIVERED' || data.status === 'DELIVERED';
 
   return (
     <div className="space-y-2">
       <MapView markers={markers} polyline={data.geometry || []} height={height} />
+      {!hasDropLocation && (
+        <p className="text-xs text-amber-700">Recipient drop-off location is missing. Assignment status and available volunteer updates are still shown.</p>
+      )}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-navy-700">
-        <span className="inline-flex items-center gap-1">
-          <Navigation className="h-3.5 w-3.5 text-brand" />
-          Remaining: <strong>{num(data.distanceKm)} km</strong> · ETA <strong>{num(data.durationMin, 0)} min</strong>
-          {data.estimated && <span className="chip bg-amber-100 text-amber-700">estimated</span>}
-        </span>
+        {hasDropLocation ? (
+          <span className="inline-flex items-center gap-1">
+            <Navigation className="h-3.5 w-3.5 text-brand" />
+            Remaining: <strong>{num(data.distanceKm)} km</strong> · ETA <strong>{num(data.durationMin, 0)} min</strong>
+            {data.estimated && <span className="chip bg-amber-100 text-amber-700">estimated</span>}
+          </span>
+        ) : (
+          <span className="text-amber-700">Route and ETA unavailable</span>
+        )}
         <span className="inline-flex items-center gap-1 text-navy-600">
           <RefreshCw className="h-3 w-3" /> updates every {pollMs / 1000}s{updated ? ` · ${updated.toLocaleTimeString()}` : ''}
         </span>
-        <a className="inline-flex items-center gap-1 font-semibold text-brand-700 hover:underline" href={data.googleMapsUrl} target="_blank" rel="noreferrer">
-          <ExternalLink className="h-3.5 w-3.5" /> Open in Google Maps
-        </a>
+        {data.googleMapsUrl && (
+          <a className="inline-flex items-center gap-1 font-semibold text-brand-700 hover:underline" href={data.googleMapsUrl} target="_blank" rel="noreferrer">
+            <ExternalLink className="h-3.5 w-3.5" /> Open in Google Maps
+          </a>
+        )}
       </div>
       {canSimulate && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-navy-100 bg-white/70 px-3 py-2 text-xs">
@@ -92,13 +102,17 @@ export default function TaskMap({ taskId, height = 340, pollMs = 5000, canSimula
               simulating ? 'bg-navy-800 text-white' : 'bg-brand-50 text-brand-700 hover:bg-brand-100'
             }`}
             onClick={() => setSimulating((s) => !s)}
-            disabled={delivered}
+            disabled={delivered || !hasDropLocation}
           >
             {simulating ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
             {simulating ? 'Stop simulation' : 'Simulate movement'}
           </button>
           <span className="text-navy-600">
-            Dev tool: moves the volunteer marker along the route{delivered ? ' (delivered)' : ''}.
+            {delivered
+              ? 'Delivery completed.'
+              : hasDropLocation
+                ? 'Dev tool: moves the volunteer marker along the route.'
+                : 'Simulation unavailable without a recipient location.'}
           </span>
         </div>
       )}
