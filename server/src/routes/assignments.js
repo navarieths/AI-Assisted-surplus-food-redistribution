@@ -251,12 +251,17 @@ router.post('/:id/fallback', async (req, res, next) => {
   }
 });
 
-/** Volunteer verifies pickup OTP (hashed, attempt-capped). On success: PICKED_UP -> IN_TRANSIT. */
+/** Assigned carrier or listing provider verifies the hashed, attempt-capped pickup OTP. */
 router.post('/:id/pickup', (req, res, next) => {
   try {
     const assignment = q.get(`SELECT * FROM assignments WHERE id = ?`, [req.params.id]);
     if (!assignment) return res.status(404).json({ error: 'Assignment not found' });
-    if (assignment.volunteer_id !== req.user.id) return res.status(403).json({ error: 'Not your assignment' });
+    const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [assignment.listing_id]);
+    const isAssignedCarrier = assignment.volunteer_id === req.user.id;
+    const isListingProvider = req.user.role === 'provider' && listing.provider_id === req.user.id;
+    if (!isAssignedCarrier && !isListingProvider) {
+      return res.status(403).json({ error: 'Only the assigned carrier or listing provider can verify pickup' });
+    }
     if (assignment.pickup_verified_at) return res.status(409).json({ error: 'Pickup already verified' });
 
     const result = checkPickupOtp(assignment, String(req.body?.otp || ''));
@@ -283,7 +288,6 @@ router.post('/:id/pickup', (req, res, next) => {
       `UPDATE assignments SET pickup_verified_at = datetime('now'), status = 'IN_TRANSIT', updated_at = datetime('now') WHERE id = ?`,
       [assignment.id]
     );
-    const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [assignment.listing_id]);
     if (listing.status !== 'PICKED_UP') transition(listing.id, 'PICKED_UP', req.user, 'Pickup OTP verified');
     transition(listing.id, 'IN_TRANSIT', req.user, 'En route to recipient');
     notify(assignment.recipient_id, 'recipient', `Your donation #${listing.id} is on the way`, `${req.user.name} picked it up.`, listing.id);
@@ -305,6 +309,9 @@ router.post('/:id/confirm-delivery', (req, res, next) => {
     if (assignment.recipient_id !== req.user.id) return res.status(403).json({ error: 'Only the recipient confirms delivery' });
     if (assignment.status === 'DELIVERED') {
       return res.json({ assignment: serializeAssignment(assignment, req.user) });
+    }
+    if (!assignment.pickup_verified_at && assignment.status !== 'IN_TRANSIT') {
+      return res.status(409).json({ error: 'Delivery can only be confirmed after pickup is verified' });
     }
     q.run(`UPDATE assignments SET status = 'DELIVERED', delivered_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`, [
       assignment.id,

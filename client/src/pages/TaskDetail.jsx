@@ -64,6 +64,7 @@ export default function TaskDetail() {
   const [carriers, setCarriers] = useState([]);
   const [offers, setOffers] = useState([]);
   const [otpReveal, setOtpReveal] = useState(null);
+  const [pickupOtp, setPickupOtp] = useState('');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -117,6 +118,17 @@ export default function TaskDetail() {
     } finally {
       setBusy('');
     }
+  };
+
+  const submitPickupOtp = (event) => {
+    event.preventDefault();
+    run('verify', async () => {
+      const result = await api.post(`/assignments/${id}/pickup`, { otp: pickupOtp });
+      setPickupOtp('');
+      return {
+        message: `Pickup verified${result.pickupVerifiedAt ? ` at ${fmtDateTime(result.pickupVerifiedAt)}` : ''}. Delivery is now in transit.`,
+      };
+    });
   };
 
   const confirmDelivery = () =>
@@ -231,9 +243,27 @@ export default function TaskDetail() {
                       {task.pickup_otp_remaining ?? 5} attempt(s) remaining.
                     </p>
                   )}
-                  <Link to={`/tasks/${task.id}/verify`} className="btn-green w-full justify-center">
-                    <KeyRound className="h-4 w-4" /> Verify pickup
-                  </Link>
+                  <form className="space-y-2" onSubmit={submitPickupOtp}>
+                    <label className="block">
+                      <span className="label">Pickup OTP</span>
+                      <input
+                        className="input text-center font-mono tracking-[0.4em]"
+                        value={pickupOtp}
+                        onChange={(event) => setPickupOtp(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        disabled={busy === 'verify' || task.pickup_otp_locked}
+                      />
+                    </label>
+                    <button
+                      className="btn-green w-full justify-center"
+                      type="submit"
+                      disabled={busy === 'verify' || task.pickup_otp_locked || pickupOtp.length !== 6}
+                    >
+                      <KeyRound className="h-4 w-4" /> {busy === 'verify' ? 'Verifying…' : 'Verify pickup'}
+                    </button>
+                  </form>
                 </div>
               ) : (
                 <p className="inline-flex items-center gap-2 rounded-lg bg-indigo-50 px-3 py-2 text-sm text-indigo-700">
@@ -287,6 +317,30 @@ export default function TaskDetail() {
                   </button>
                 ) : (
                   <p className="mt-1 text-xs text-navy-600">No pickup OTP yet — invite or assign a carrier to issue one.</p>
+                )}
+                {otpReveal?.otp && !pickedUp && !delivered && (
+                  <form className="mt-3 space-y-2 border-t border-navy-100 pt-3" onSubmit={submitPickupOtp}>
+                    <p className="text-xs text-navy-600">Demo: verify this pickup here, or have the assigned carrier enter the code on their task page.</p>
+                    <label className="block">
+                      <span className="label">Verify pickup OTP</span>
+                      <input
+                        className="input text-center font-mono tracking-[0.4em]"
+                        value={pickupOtp}
+                        onChange={(event) => setPickupOtp(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        disabled={busy === 'verify' || task.pickup_otp_locked}
+                      />
+                    </label>
+                    <button
+                      className="btn-green w-full justify-center"
+                      type="submit"
+                      disabled={busy === 'verify' || task.pickup_otp_locked || pickupOtp.length !== 6}
+                    >
+                      <KeyRound className="h-4 w-4" /> {busy === 'verify' ? 'Verifying…' : 'Verify pickup'}
+                    </button>
+                  </form>
                 )}
               </div>
 

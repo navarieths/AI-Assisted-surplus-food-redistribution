@@ -131,11 +131,39 @@ test('accept invites volunteers and decline notifies provider', async () => {
     );
   }
 
-  q.run(
-    `UPDATE assignments SET status = 'IN_TRANSIT', pickup_verified_at = datetime('now') WHERE id = ?`,
-    [assignment.id]
+  const prematureConfirmation = await fetch(
+    `${baseUrl}/assignments/${assignment.id}/confirm-delivery`,
+    { method: 'POST', headers: headersFor(recipient) }
   );
-  q.run(`UPDATE listings SET status = 'IN_TRANSIT' WHERE id = ?`, [accepted.listingId]);
+  assert.equal(prematureConfirmation.status, 409);
+  assert.equal(
+    q.get(`SELECT status FROM listings WHERE id = ?`, [accepted.listingId]).status,
+    'VOLUNTEER_ASSIGNED'
+  );
+
+  const wrongProvider = createUser('provider', 'wrong-provider@response.test');
+  const forbiddenVerify = await fetch(`${baseUrl}/assignments/${assignment.id}/pickup`, {
+    method: 'POST',
+    headers: { ...headersFor(wrongProvider), 'content-type': 'application/json' },
+    body: JSON.stringify({ otp: '000000' }),
+  });
+  assert.equal(forbiddenVerify.status, 403);
+
+  const otpResponse = await fetch(`${baseUrl}/assignments/${assignment.id}/pickup-otp`, {
+    headers: headersFor(provider),
+  });
+  assert.equal(otpResponse.status, 200);
+  const { otp } = await otpResponse.json();
+  const verifyResponse = await fetch(`${baseUrl}/assignments/${assignment.id}/pickup`, {
+    method: 'POST',
+    headers: { ...headersFor(provider), 'content-type': 'application/json' },
+    body: JSON.stringify({ otp }),
+  });
+  assert.equal(verifyResponse.status, 200);
+  assert.equal(
+    q.get(`SELECT status FROM listings WHERE id = ?`, [accepted.listingId]).status,
+    'IN_TRANSIT'
+  );
   const deliveredResponse = await fetch(
     `${baseUrl}/assignments/${assignment.id}/confirm-delivery`,
     { method: 'POST', headers: headersFor(recipient) }
