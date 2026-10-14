@@ -30,7 +30,8 @@ export function authRequired(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Authentication required' });
   try {
     const payload = jwt.verify(token, config.jwtSecret);
-    const user = withProfile(q.get(`SELECT * FROM users WHERE id = ?`, [payload.id]));
+    const account = q.get(`SELECT * FROM users WHERE id = ?`, [payload.id]);
+    const user = withProfile(account && { ...account, role: payload.role || account.role });
     if (!user || !user.active) return res.status(401).json({ error: 'Account not found' });
     req.user = user;
     next();

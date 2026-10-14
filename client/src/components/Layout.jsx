@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
 import { api } from '../lib/api.js';
+import { getRoleHome } from '../lib/roles.js';
 
 const NAV = {
   provider: [
@@ -60,14 +61,25 @@ function NotificationBell() {
 }
 
 export default function Layout({ children }) {
-  const { user, logout } = useAuth();
+  const { user, logout, switchRole } = useAuth();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const [roleError, setRoleError] = useState('');
   const links = NAV[user?.role] || [];
 
   const doLogout = () => {
     logout();
     navigate('/login');
+  };
+
+  const changeRole = async (event) => {
+    setRoleError('');
+    try {
+      const nextUser = await switchRole(event.target.value);
+      navigate(getRoleHome(nextUser.role));
+    } catch (error) {
+      setRoleError(error.message || 'Could not switch role');
+    }
   };
 
   const roleLabel = { provider: 'Provider', recipient: 'Recipient', volunteer: 'Volunteer', delivery_partner: 'Delivery partner' }[user?.role];
@@ -111,6 +123,18 @@ export default function Layout({ children }) {
               <div className="font-semibold">{user?.name}</div>
               <div className="text-white/70">{roleLabel}</div>
             </div>
+            <select
+              aria-label="Switch active role"
+              className="max-w-36 rounded-md border border-white/20 bg-navy-700 px-2 py-1.5 text-xs text-white"
+              value={user?.role || ''}
+              onChange={changeRole}
+            >
+              {['provider', 'recipient', 'volunteer', 'delivery_partner'].map((role) => (
+                <option key={role} value={role} className="text-navy-800">
+                  {role.replace('_', ' ')}
+                </option>
+              ))}
+            </select>
             <button onClick={doLogout} className="hidden rounded-lg p-2 hover:bg-white/10 sm:inline-flex" title="Log out">
               <LogOut className="h-5 w-5" />
             </button>
@@ -145,6 +169,8 @@ export default function Layout({ children }) {
           </div>
         )}
       </header>
+
+      {roleError && <div role="alert" className="bg-red-50 px-4 py-2 text-center text-sm text-red-700">{roleError}</div>}
 
       <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
 

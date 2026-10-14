@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import { statusMeta } from '../lib/format.js';
 
@@ -52,4 +53,22 @@ export function ErrorNote({ children }) {
 export function InfoNote({ children }) {
   if (!children) return null;
   return <p className="rounded-lg bg-brand-50 px-3 py-2 text-sm text-brand-700">{children}</p>;
+}
+
+/** Live countdown to an ISO/SQLite expiry timestamp. */
+export function Countdown({ expiresAt, className = '' }) {
+  const secondsLeft = () =>
+    expiresAt ? Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000)) : 0;
+  const [left, setLeft] = useState(secondsLeft);
+  useEffect(() => {
+    setLeft(secondsLeft());
+    if (!expiresAt) return undefined;
+    const t = setInterval(() => setLeft(secondsLeft()), 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expiresAt]);
+  if (!expiresAt) return null;
+  const m = Math.floor(left / 60);
+  const s = left % 60;
+  return <span className={className}>{left <= 0 ? 'expired' : `${m}:${String(s).padStart(2, '0')} left`}</span>;
 }

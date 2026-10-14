@@ -52,15 +52,20 @@ function Detail({ icon: Icon, label, children }) {
 
 export default function RecipientInbox() {
   const [offers, setOffers] = useState(null);
+  const [listings, setListings] = useState(null);
   const [busy, setBusy] = useState(null);
   const [confirming, setConfirming] = useState(null);
   const [notice, setNotice] = useState(null);
   const [error, setError] = useState('');
 
   const load = useCallback(() => {
-    api
-      .get('/offers')
-      .then((d) => setOffers(d.offers))
+    Promise.all([api.get('/offers'), api.get('/listings')])
+      .then(([offerData, listingData]) => {
+        const currentOffers = offerData.offers || [];
+        const offerListingIds = new Set(currentOffers.map((offer) => offer.listing?.id));
+        setOffers(currentOffers);
+        setListings((listingData.listings || []).filter((listing) => !offerListingIds.has(listing.id)));
+      })
       .catch((e) => setError(e.message));
   }, []);
 
@@ -73,10 +78,12 @@ export default function RecipientInbox() {
     setError('');
     setNotice(null);
     try {
-      await api.post(`/offers/${o.id}/accept`);
+      const result = await api.post(`/offers/${o.id}/accept`);
       setNotice({
         kind: 'ok',
-        text: 'Accepted. A volunteer will be assigned to collect it.',
+        text: result.invitedVolunteers
+          ? `Accepted. The provider was notified and ${result.invitedVolunteers} volunteer(s) invited.`
+          : 'Accepted. The provider was notified; no volunteers are available to invite yet.',
         link: '/recipient',
         linkText: 'View my deliveries',
       });
@@ -114,7 +121,7 @@ export default function RecipientInbox() {
   };
 
   if (error && !offers) return <div className="card p-4 text-red-700">{error}</div>;
-  if (!offers) return <Spinner />;
+  if (!offers || !listings) return <Spinner />;
 
   const open = offers.filter((o) => o.status === 'OFFERED');
   const rest = offers.filter((o) => o.status !== 'OFFERED');
@@ -257,6 +264,32 @@ export default function RecipientInbox() {
           </div>
         );
       })}
+
+      <section className="space-y-3">
+        <h2 className="font-semibold text-navy-800">Available surplus</h2>
+        {listings.length === 0 && (
+          <EmptyState title="No available surplus" hint="New eligible listings will appear here." />
+        )}
+        {listings.map((listing) => (
+          <Link key={listing.id} to={`/listings/${listing.id}`} className="card block p-4 transition hover:border-brand">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <h3 className="font-semibold text-navy-800">{listing.title}</h3>
+                <p className="mt-1 text-sm text-navy-600">
+                  {listing.provider?.org_name || listing.provider?.name} · {listing.address || 'Pickup location'}
+                </p>
+                <p className="mt-1 text-xs capitalize text-navy-600">
+                  {listing.food_type} · {num(listing.quantity_kg)} kg · {listing.servings} servings
+                </p>
+              </div>
+              <div className="text-right text-xs text-navy-600">
+                <StatusBadge status={listing.status} />
+                <div className="mt-1">Pickup by {fmtDateTime(listing.pickup_deadline)}</div>
+              </div>
+            </div>
+          </Link>
+        ))}
+      </section>
 
       {rest.length > 0 && (
         <div className="space-y-2">

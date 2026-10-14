@@ -1,7 +1,7 @@
 import { config } from '../config.js';
 import { q } from '../db.js';
 import { persistOffers } from './matching.js';
-import { generateOtp, logEvent, notify, transition } from './workflow.js';
+import { generateOtp, issuePickupOtp, logEvent, notify, transition } from './workflow.js';
 import { validateListing } from './validate.js';
 import { canViewContact } from './access.js';
 
@@ -244,7 +244,13 @@ export function acceptOffer(offer, recipient, actor) {
   const assignment = q.get(`SELECT * FROM assignments WHERE id = ?`, [info.lastInsertRowid]);
 
   notify(listing.provider_id, 'provider', `Donation #${listing.id} accepted`, `${recipient.name} accepted — awaiting volunteer.`, listing.id);
-  notify(recipient.id, 'recipient', `You accepted donation #${listing.id}`, 'A volunteer will be assigned shortly.', listing.id);
+  notify(
+    recipient.id,
+    'recipient',
+    `You accepted donation #${listing.id}`,
+    'Ranked volunteer invitations have been sent. You will be notified when one accepts.',
+    listing.id
+  );
   return { offer: q.get(`SELECT * FROM offers WHERE id = ?`, [offer.id]), assignment };
 }
 
@@ -278,34 +284,45 @@ export function assignVolunteer(assignment, volunteer, actor, { fallback = false
   }
   const pickupOtp = generateOtp();
   q.run(
-    `UPDATE assignments SET volunteer_id = ?, status = 'ASSIGNED', pickup_otp = ?, fallback = ?, updated_at = datetime('now')
+    `UPDATE assignments SET volunteer_id = ?, status = 'ASSIGNED', fallback = ?, updated_at = datetime('now')
      WHERE id = ?`,
-    [volunteer.id, pickupOtp, fallback ? 1 : 0, assignment.id]
+    [volunteer.id, fallback ? 1 : 0, assignment.id]
   );
+  // Only the bcrypt hash is stored; the plain OTP is delivered to the provider.
+  issuePickupOtp(assignment.id, pickupOtp);
   const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [assignment.listing_id]);
   if (listing.status !== 'VOLUNTEER_ASSIGNED') {
     transition(listing.id, 'VOLUNTEER_ASSIGNED', actor, fallback ? 'Fallback carrier assigned' : 'Volunteer assigned');
   }
   notify(volunteer.id, volunteer.role, `Pickup assigned: ${listing.title}`, `Collect from ${listing.address || 'pickup point'} before deadline.`, listing.id);
-  notify(listing.provider_id, 'provider', `Volunteer assigned to #${listing.id}`, `${volunteer.name} will collect. Provider OTP: ${pickupOtp}`, listing.id);
+  notify(listing.provider_id, 'provider', `Volunteer assigned to #${listing.id}`, `${volunteer.name} will collect. Pickup OTP: ${pickupOtp}`, listing.id);
   notify(assignment.recipient_id, 'recipient', `Volunteer assigned to #${listing.id}`, `${volunteer.name} is bringing your donation.`, listing.id);
   return q.get(`SELECT * FROM assignments WHERE id = ?`, [assignment.id]);
 }
 
 export function serializeAssignment(assignment, user) {
   if (!assignment) return null;
+  // Strip secrets from the raw spread; re-add only the fields the caller owns.
+  const { pickup_otp, pickup_otp_hash, delivery_otp, ...safe } = assignment;
   const listing = q.get(`SELECT * FROM listings WHERE id = ?`, [assignment.listing_id]);
   const recipient = recipientRow(assignment.recipient_id);
   const volunteer = assignment.volunteer_id ? carrierRow(assignment.volunteer_id) : null;
   const provider = providerRow(listing.provider_id);
   const authorized = canViewContact(listing, user);
   const mask = (u) => (u ? { ...u, phone: authorized ? u.phone : null, email: authorized ? u.email : null } : null);
+  const isProviderOwner = user.role === 'provider' && listing.provider_id === user.id;
+  const isAssignedCarrier = assignment.volunteer_id === user.id;
+  const attempts = Number(assignment.pickup_otp_attempts || 0);
   return {
-    ...assignment,
-    pickup_otp: user.role === 'volunteer' || user.role === 'delivery_partner' || user.id === provider.id
-      ? assignment.pickup_otp
-      : undefined,
-    delivery_otp: user.id === assignment.recipient_id ? assignment.delivery_otp : undefined,
+    ...safe,
+    delivery_otp: user.id === assignment.recipient_id ? delivery_otp : undefined,
+    // Carriers see their attempt budget (never the code); the provider can
+    // reveal the plain OTP through the dedicated endpoint.
+    pickup_otp_attempts: isAssignedCarrier ? attempts : undefined,
+    pickup_otp_locked: isAssignedCarrier ? Boolean(assignment.pickup_otp_locked) : undefined,
+    pickup_otp_remaining: isAssignedCarrier ? Math.max(0, config.otp.maxAttempts - attempts) : undefined,
+    pickup_otp_issued_at: isProviderOwner || isAssignedCarrier ? assignment.pickup_otp_issued_at : undefined,
+    pickup_otp_available: Boolean(pickup_otp_hash || pickup_otp),
     listing: serializeListing(listing, user),
     recipient: mask(recipient),
     volunteer: mask(volunteer),

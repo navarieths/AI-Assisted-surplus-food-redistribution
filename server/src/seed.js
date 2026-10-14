@@ -1,6 +1,6 @@
 import { db, q } from './db.js';
 import { hashPassword } from './auth.js';
-import { logEvent, notify } from './services/workflow.js';
+import { hashOtp, logEvent, notify } from './services/workflow.js';
 import { validateListing } from './services/validate.js';
 import { scoreCandidate, templateExplanation } from './services/matching.js';
 
@@ -24,6 +24,7 @@ function resetTables() {
     'volunteer_locations',
     'notifications',
     'status_events',
+    'assignment_offers',
     'assignments',
     'offers',
     'validation_results',
@@ -185,6 +186,44 @@ function addOffer(listing, recipient, status, rank, override) {
   return q.get(`SELECT * FROM offers WHERE listing_id = ? AND recipient_id = ?`, [listing.id, recipient.id]);
 }
 
+/**
+ * Seed a ranked volunteer invitation. Score mirrors the ranking service
+ * (travel 50 / availability 30 / feasibility 20) using an offline Haversine leg.
+ */
+function addVolunteerOffer(assignmentId, volunteer, listing, { rank, status, minutesLeft = 10 }) {
+  const distanceKm = Math.round(haversineKm(listing, volunteer) * 100) / 100;
+  const travelMin = Math.round((distanceKm / 25) * 60 * 10) / 10;
+  const travelScore = Math.max(0, 1 - travelMin / 60);
+  const score = Math.round(travelScore * 50 + 30 + 20);
+  const expiresAt = new Date(NOW + minutesLeft * 60 * 1000).toISOString();
+  q.run(
+    `INSERT INTO assignment_offers
+       (assignment_id, volunteer_id, rank, score, travel_min, distance_km, feasible, available,
+        reasons_json, status, expires_at, responded_at)
+     VALUES (?,?,?,?,?,?,1,1,?,?,?,?)`,
+    [
+      assignmentId,
+      volunteer.id,
+      rank,
+      score,
+      travelMin,
+      distanceKm,
+      JSON.stringify({
+        reasons: [
+          `${travelMin} min / ${distanceKm} km to pickup (estimated)`,
+          'available',
+          'can reach pickup before the deadline',
+          'delivery inside collection hours',
+        ],
+        breakdown: { travelTime: Math.round(travelScore * 50), availability: 30, feasibility: 20 },
+      }),
+      status,
+      status === 'OFFERED' ? expiresAt : null,
+      status === 'OFFERED' ? null : new Date(NOW).toISOString().replace('T', ' ').slice(0, 19),
+    ]
+  );
+}
+
 function setListingStatus(listingId, from, to, reason) {
   q.run(`UPDATE listings SET status = ?, updated_at = datetime('now') WHERE id = ?`, [to, listingId]);
   logEvent(listingId, from, to, { id: 1, role: 'system' }, reason);
@@ -285,12 +324,23 @@ async function main() {
     setListingStatus(l4.id, 'ELIGIBLE', 'OFFERED', 'Offered to top matches');
     setListingStatus(l4.id, 'OFFERED', 'ACCEPTED', 'Recipient accepted');
     const m = addOffer(l4, user('annapurna@demo.test'), 'ACCEPTED', 1);
-    q.run(
+    const a4 = q.run(
       `INSERT INTO assignments (listing_id, offer_id, recipient_id, status, delivery_otp)
        VALUES (?,?,?, 'CREATED', '654321')`,
       [l4.id, m.id, U('annapurna@demo.test')]
     );
-    notify(U('freshmart@demo.test'), 'provider', 'Donation accepted', 'Annapurna Community Kitchen accepted — awaiting volunteer.', l4.id);
+    const a4id = Number(a4.lastInsertRowid);
+    // Ranked volunteer invitations awaiting accept/decline (with expiry).
+    const ranked = [
+      ['rahul@demo.test', 1],
+      ['priya@demo.test', 2],
+      ['arjun@demo.test', 3],
+    ];
+    ranked.forEach(([email, rank]) => {
+      addVolunteerOffer(a4id, user(email), l4, { rank, status: 'OFFERED', minutesLeft: 9 });
+      notify(U(email), 'volunteer', 'Pickup invitation', `Rice & Dal — accept within 10 minutes.`, l4.id);
+    });
+    notify(U('freshmart@demo.test'), 'provider', 'Donation accepted', 'Annapurna Community Kitchen accepted — invited 3 ranked volunteers.', l4.id);
   }
 
   // 5. IN_TRANSIT — volunteer picked up, en route
@@ -313,11 +363,13 @@ async function main() {
     const m = addOffer(l5, user('hope@demo.test'), 'ACCEPTED', 1);
     setListingStatus(l5.id, 'ACCEPTED', 'VOLUNTEER_ASSIGNED', 'Rahul Verma assigned');
     const info = q.run(
-      `INSERT INTO assignments (listing_id, offer_id, recipient_id, volunteer_id, status, pickup_otp, delivery_otp, pickup_verified_at)
-       VALUES (?,?,?,?, 'IN_TRANSIT', '135790', '246801', datetime('now','-18 minutes'))`,
-      [l5.id, m.id, U('hope@demo.test'), U('rahul@demo.test')]
+      `INSERT INTO assignments (listing_id, offer_id, recipient_id, volunteer_id, status, pickup_otp_hash, pickup_otp_issued_at, delivery_otp, pickup_verified_at)
+       VALUES (?,?,?,?, 'IN_TRANSIT', ?, datetime('now','-25 minutes'), '246801', datetime('now','-18 minutes'))`,
+      [l5.id, m.id, U('hope@demo.test'), U('rahul@demo.test'), hashOtp('135790')]
     );
     const assignmentId = Number(info.lastInsertRowid);
+    addVolunteerOffer(assignmentId, user('rahul@demo.test'), l5, { rank: 1, status: 'ACCEPTED' });
+    notify(U('spice@demo.test'), 'provider', 'Volunteer assigned to #' + l5.id, 'Rahul Verma will collect. Pickup OTP: 135790', l5.id);
     setListingStatus(l5.id, 'VOLUNTEER_ASSIGNED', 'PICKED_UP', 'Pickup OTP verified');
     setListingStatus(l5.id, 'PICKED_UP', 'IN_TRANSIT', 'En route to recipient');
     // a short breadcrumb trail between MG Road and Koramangala
@@ -354,9 +406,9 @@ async function main() {
     const m = addOffer(l6, user('hope@demo.test'), 'ACCEPTED', 1);
     setListingStatus(l6.id, 'ACCEPTED', 'VOLUNTEER_ASSIGNED', 'Priya Nair assigned');
     q.run(
-      `INSERT INTO assignments (listing_id, offer_id, recipient_id, volunteer_id, status, pickup_otp, delivery_otp, pickup_verified_at, delivered_at)
-       VALUES (?,?,?,?, 'DELIVERED', '111222', '333444', datetime('now','-4 hours'), datetime('now','-3 hours'))`,
-      [l6.id, m.id, U('hope@demo.test'), U('priya@demo.test')]
+      `INSERT INTO assignments (listing_id, offer_id, recipient_id, volunteer_id, status, pickup_otp_hash, delivery_otp, pickup_verified_at, delivered_at)
+       VALUES (?,?,?,?, 'DELIVERED', ?, '333444', datetime('now','-4 hours'), datetime('now','-3 hours'))`,
+      [l6.id, m.id, U('hope@demo.test'), U('priya@demo.test'), hashOtp('111222')]
     );
     setListingStatus(l6.id, 'VOLUNTEER_ASSIGNED', 'PICKED_UP', 'Pickup OTP verified');
     setListingStatus(l6.id, 'PICKED_UP', 'IN_TRANSIT', 'En route');
@@ -392,9 +444,9 @@ async function main() {
     const m = addOffer(listing, rUser, 'ACCEPTED', 1);
     setListingStatus(listing.id, 'ACCEPTED', 'VOLUNTEER_ASSIGNED', 'Volunteer assigned');
     q.run(
-      `INSERT INTO assignments (listing_id, offer_id, recipient_id, volunteer_id, status, pickup_otp, delivery_otp, pickup_verified_at, delivered_at)
-       VALUES (?,?,?,?, 'DELIVERED', '000000', '999999', datetime('now', ?), datetime('now', ?))`,
-      [listing.id, m.id, rUser.id, user(h.volunteer).id, `-${h.days * 24 + 4} hours`, `-${h.days * 24 + 3} hours`]
+      `INSERT INTO assignments (listing_id, offer_id, recipient_id, volunteer_id, status, pickup_otp_hash, delivery_otp, pickup_verified_at, delivered_at)
+       VALUES (?,?,?,?, 'DELIVERED', ?, '999999', datetime('now', ?), datetime('now', ?))`,
+      [listing.id, m.id, rUser.id, user(h.volunteer).id, hashOtp('000000'), `-${h.days * 24 + 4} hours`, `-${h.days * 24 + 3} hours`]
     );
     setListingStatus(listing.id, 'VOLUNTEER_ASSIGNED', 'PICKED_UP', 'Pickup verified');
     setListingStatus(listing.id, 'PICKED_UP', 'IN_TRANSIT', 'En route');
@@ -409,6 +461,7 @@ async function main() {
     (SELECT COUNT(*) FROM listings WHERE id <= 6) AS core_listings,
     (SELECT COUNT(*) FROM listings) AS listings,
     (SELECT COUNT(*) FROM offers) AS offers,
+    (SELECT COUNT(*) FROM assignment_offers) AS volunteer_invites,
     (SELECT COUNT(*) FROM assignments WHERE status='DELIVERED') AS delivered`);
 
   console.log('Seed complete:', counts);

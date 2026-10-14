@@ -101,3 +101,52 @@ export function verifyOtp(otp, hash) {
     return false;
   }
 }
+
+/**
+ * Persist a freshly generated pickup OTP: only the bcrypt hash is stored, plus
+ * the issue time and a reset attempt counter. The plain value is handed back to
+ * the caller so it can be delivered to the provider (simulated notification).
+ */
+export function issuePickupOtp(assignmentId, otp = generateOtp()) {
+  q.run(
+    `UPDATE assignments
+        SET pickup_otp_hash = ?, pickup_otp = NULL, pickup_otp_attempts = 0,
+            pickup_otp_locked = 0, pickup_otp_issued_at = datetime('now'),
+            updated_at = datetime('now')
+      WHERE id = ?`,
+    [hashOtp(otp), assignmentId]
+  );
+  return otp;
+}
+
+/**
+ * Compare a submitted OTP against the stored hash and enforce the attempt cap.
+ * Legacy rows that still carry a clear-text `pickup_otp` (e.g. old seed data)
+ * are accepted as a fallback. Returns { ok, locked, remaining }.
+ */
+export function checkPickupOtp(assignment, submitted) {
+  const max = config.otp.maxAttempts;
+  if (assignment.pickup_otp_locked) {
+    return { ok: false, locked: true, remaining: 0 };
+  }
+  const matches = assignment.pickup_otp_hash
+    ? verifyOtp(submitted, assignment.pickup_otp_hash)
+    : Boolean(assignment.pickup_otp) && String(submitted) === String(assignment.pickup_otp);
+
+  if (matches) {
+    q.run(
+      `UPDATE assignments SET pickup_otp_attempts = 0, updated_at = datetime('now') WHERE id = ?`,
+      [assignment.id]
+    );
+    return { ok: true, locked: false, remaining: max };
+  }
+
+  const attempts = Number(assignment.pickup_otp_attempts || 0) + 1;
+  const locked = attempts >= max;
+  q.run(
+    `UPDATE assignments SET pickup_otp_attempts = ?, pickup_otp_locked = ?, updated_at = datetime('now')
+      WHERE id = ?`,
+    [attempts, locked ? 1 : 0, assignment.id]
+  );
+  return { ok: false, locked, remaining: Math.max(0, max - attempts) };
+}

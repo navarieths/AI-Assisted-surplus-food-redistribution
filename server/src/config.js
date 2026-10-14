@@ -55,6 +55,8 @@ export const config = {
   volunteerOffer: {
     timeoutSec: Number(process.env.VOLUNTEER_OFFER_TIMEOUT_SEC || 600),
     limit: Number(process.env.VOLUNTEER_OFFER_LIMIT || 3),
+    // Travel time to pickup (minutes) that scores zero on the travel component.
+    maxTravelMin: Number(process.env.VOLUNTEER_MAX_TRAVEL_MIN || 60),
     weights: {
       travelTime: 50,
       availability: 30,
@@ -78,4 +80,10 @@ export const config = {
   },
 
   otpExpiryMin: Number(process.env.OTP_EXPIRY_MIN || 30),
+
+  // Dev-only conveniences. `simulateMovement` lets a participant advance the
+  // volunteer marker along the route so the tracking demo works from a laptop.
+  dev: {
+    simulateMovement: process.env.ALLOW_SIMULATION !== 'false',
+  },
 };

@@ -1,6 +1,7 @@
 import { Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { useAuth } from './lib/auth.jsx';
+import { getRoleHome } from './lib/roles.js';
 import Layout from './components/Layout.jsx';
 import Landing from './pages/Landing.jsx';
 import Login from './pages/Login.jsx';
@@ -12,6 +13,7 @@ import RecipientTasks from './pages/RecipientTasks.jsx';
 import VolunteerAvailable from './pages/VolunteerAvailable.jsx';
 import VolunteerTasks from './pages/VolunteerTasks.jsx';
 import TaskDetail from './pages/TaskDetail.jsx';
+import VerifyPickup from './pages/VerifyPickup.jsx';
 import Impact from './pages/Impact.jsx';
 import Notifications from './pages/Notifications.jsx';
 import Carriers from './pages/Carriers.jsx';
@@ -36,8 +38,7 @@ function Protected() {
 function Home() {
   const { user } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
-  const dest = user.role === 'provider' ? '/provider' : user.role === 'recipient' ? '/inbox' : '/volunteer';
-  return <Navigate to={dest} replace />;
+  return <Navigate to={getRoleHome(user.role)} replace />;
 }
 
 export default function App() {
@@ -56,6 +57,7 @@ export default function App() {
         <Route path="/volunteer" element={<VolunteerAvailable />} />
         <Route path="/my-tasks" element={<VolunteerTasks />} />
         <Route path="/tasks/:id" element={<TaskDetail />} />
+        <Route path="/tasks/:id/verify" element={<VerifyPickup />} />
         <Route path="/volunteers" element={<Carriers />} />
         <Route path="/impact" element={<Impact />} />
         <Route path="/notifications" element={<Notifications />} />

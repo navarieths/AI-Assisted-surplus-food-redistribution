@@ -8,6 +8,10 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
+app.get('/', (_req, res) => {
+  res.redirect(302, 'http://localhost:5173/');
+});
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, mapProvider: config.mapProvider, ai: Boolean(config.llm.apiKey) });
 });

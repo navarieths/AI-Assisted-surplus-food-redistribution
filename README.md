@@ -35,9 +35,8 @@ npm run dev          # starts API (:4000) and client (:5173)
 ```
 
 Then open http://localhost:5173 — you'll land on the public **landing page**.
-Use **Get started** to register (the address field uses the real map picker), or
-**Log in** with any demo account (password `password123`) / the one-click demo
-buttons on the login screen.
+Use **Sign in** with any demo account (password `password123`) or choose a
+one-click demo account on the login screen.
 
 ```bash
 npm test             # runs the backend unit tests (node:test)
@@ -64,12 +63,22 @@ npm run build        # production build of the client
    the top 10 → deterministic 0–100 score. The **top 5** become offers, and the
    provider screen draws them on a map (pickup + recipient markers, route lines).
 3. **Recipient** accepts an offer → listing `ACCEPTED`, an **assignment** is created.
-4. A **volunteer** claims the task (or the provider assigns one / triggers the
-   fallback carrier) → `VOLUNTEER_ASSIGNED`.
-5. Volunteer enters the **pickup OTP** → `PICKED_UP` → `IN_TRANSIT`, and the app
-   posts the volunteer's GPS every 10s.
+4. The recipient/provider (or the **Carriers** screen) triggers **Rank & invite
+   volunteers**: carriers are ranked by real travel time to the pickup,
+   availability and feasibility, and the top few are invited. Each invitation
+   has a **configurable timeout**; declining or timing out **cascades** to the
+   next ranked carrier, and when the list is exhausted the provider is nudged to
+   the fallback path. A volunteer can also **claim** an open pickup directly, or
+   the provider can assign one directly → `VOLUNTEER_ASSIGNED`.
+5. The provider is shown the **pickup OTP** (delivered via the simulated
+   notification channel and stored only as a **bcrypt hash**). The volunteer
+   opens the dedicated **Verify Pickup** screen, enters the code (max **5
+   attempts**, then locked) → `PICKED_UP` → `IN_TRANSIT`, with the pickup
+   **timestamp** recorded. The app then posts the volunteer's GPS every 10s.
 6. Recipient and provider watch the live map (polled every 5s) with route,
-   remaining distance and ETA.
+   remaining distance and ETA. A **“Simulate movement”** dev toggle advances the
+   volunteer marker along the route server-side, so the demo works from a laptop
+   with no real GPS.
 7. **Recipient confirms delivery** → `DELIVERED`, and the impact dashboard updates.
 
 ### Seeded listings (`npm run seed`)
@@ -81,8 +90,8 @@ Six listings in different states, all with **real coordinates in Bengaluru**:
 | 1 | `LISTED` | Fresh listing, not yet validated |
 | 2 | `FLAGGED` | Non-veg stored ambient — blocked by a high-severity rule |
 | 3 | `OFFERED` | Ranked matches sent to recipients |
-| 4 | `ACCEPTED` | Awaiting a volunteer |
-| 5 | `IN_TRANSIT` | Volunteer picked up, live breadcrumb trail |
+| 4 | `ACCEPTED` | Awaiting a volunteer — 3 ranked invitations are seeded (with expiry) |
+| 5 | `IN_TRANSIT` | Volunteer picked up (OTP stored hashed), live breadcrumb trail |
 | 6 | `DELIVERED` | Completed with impact data |
 
 Extra **historical delivered** donations are also seeded so the impact
@@ -106,7 +115,8 @@ Normalised, one profile table per role (each keyed by `user_id`):
 | `listings` | Surplus food listings (incl. `handling_notes`, per-listing `contact_name`/`contact_phone`) + workflow `status` |
 | `validation_results` | Rule-check history for a listing (`eligible`, `flags_json`, `disclaimer`, `checked_at`) |
 | `offers` | Deterministic matches offered to recipients (`score`, `breakdown_json`, `rank`, `status`) |
-| `assignments` | Pickup/delivery jobs (`offer_id`, recipient, volunteer, OTPs, timestamps) |
+| `assignments` | Pickup/delivery jobs (`offer_id`, recipient, volunteer, pickup OTP **hash**, attempts/lock, timestamps) |
+| `assignment_offers` | Ranked **volunteer invitations** per assignment (`score`, `travel_min`, `distance_km`, `feasible`, `available`, `reasons_json`, `status`, `expires_at`) |
 | `status_events` | Every workflow transition with actor and reason |
 | `notifications` | Simulated notifications |
 | `volunteer_locations` | Live carrier breadcrumbs for tracking |
@@ -119,11 +129,11 @@ detects the older de-normalised layout and recreates the tables — run
 
 | Area | Endpoints |
 |------|-----------|
-| Auth | `POST /auth/register`, `POST /auth/login`, `GET /auth/me`, `GET /auth/demo-accounts` |
+| Auth | `POST /auth/login`, `GET /auth/me`, `GET /auth/demo-accounts` |
 | Geo | `GET /geo/search`, `GET /geo/reverse`, `GET /geo/route` |
 | Listings | `GET/POST /listings`, `GET/PATCH /listings/:id`, `POST /listings/:id/{validate,match,expire,at-risk}`, `GET /listings/:id/offers`, `GET /listings/:id/matches` (provider match map) |
 | Offers | `GET /offers`, `POST /offers/:id/{accept,decline,explain}` |
-| Assignments | `GET /assignments`, `GET /assignments/available`, `GET /assignments/:id`, `POST /assignments/:id/{claim,assign,fallback,pickup,confirm-delivery}`, `GET /assignments/:id/track` |
+| Assignments | `GET /assignments`, `GET /assignments/available`, `GET /assignments/invitations`, `POST /assignments/invitations/:offerId/respond`, `GET /assignments/:id`, `POST /assignments/:id/{invite,claim,assign,fallback,pickup,confirm-delivery}`, `GET /assignments/:id/volunteer-offers`, `GET /assignments/:id/pickup-otp`, `POST /assignments/:id/simulate-location`, `GET /assignments/:id/track` |
 | Carriers | `GET /volunteers`, `POST /volunteers/location` |
 | Impact | `GET /impact` |
 | Notifications | `GET /notifications`, `POST /notifications/read-all` |
@@ -209,6 +219,43 @@ text, never the score. Without a key, a deterministic template is used.
 
 ---
 
+## Volunteer assignment & pickup OTP
+
+**Ranking** (`server/src/services/volunteerAssignment.js`) scores every active
+carrier (volunteer or delivery partner) deterministically:
+
+| Component | Weight | Meaning |
+|-----------|--------|---------|
+| Travel time to pickup | 50 | real OSRM duration carrier → pickup (Haversine fallback), scored down to 0 at `VOLUNTEER_MAX_TRAVEL_MIN` |
+| Availability | 30 | opted-in, reduced by the carrier's active task count; opted-out scores 0 |
+| Feasibility | 20 | can reach the pickup before the deadline **and** deliver inside the recipient's collection hours |
+
+The top `VOLUNTEER_OFFER_LIMIT` carriers are invited (each invitation stores
+`expires_at = now + VOLUNTEER_OFFER_TIMEOUT_SEC`). Invitations are **swept
+lazily** on the next relevant request: expired invitations are marked `EXPIRED`
+and the assignment **cascades** to the next ranked, not-yet-invited carriers.
+When nobody is left, the provider gets a notification to trigger the fallback
+carrier. Accepting assigns the carrier and supersedes the remaining invitations;
+declining cascades immediately.
+
+**Pickup OTP**: a 6-digit code is generated on assignment. Only a **bcrypt hash**
+is stored (`pickup_otp_hash`), the clear-text column is left `NULL`, and the
+plain value is delivered to the provider through the simulated notification and
+exposed via the **provider-only** `GET /assignments/:id/pickup-otp` endpoint.
+Verification is capped at `OTP_MAX_ATTEMPTS` (default **5**); after that the
+assignment is locked (`pickup_otp_locked`) and even a correct code is rejected
+until it is re-issued. The serialized assignment never leaks the hash or the
+plain OTP — carriers only see their remaining attempt count.
+
+**Simulate movement** (`ALLOW_SIMULATION`, default on): any participant can call
+`POST /assignments/:id/simulate-location` to advance the volunteer marker one
+step along the real OSRM route; the breadcrumb is stored like a genuine
+geolocation post, so the provider/recipient tracking screens pick it up through
+normal polling. The **Task map** shows a “Simulate movement” toggle. Set
+`ALLOW_SIMULATION=false` to disable the endpoint in production.
+
+---
+
 ## Real maps
 
 - **`MapPicker`** is used for every location input: search box (Nominatim,
@@ -226,7 +273,7 @@ text, never the score. Without a key, a deterministic template is used.
   move the marker.
 - **Task map** shows the pickup marker (green), drop marker (navy), volunteer
   marker, the OSRM route polyline, remaining distance and ETA, plus an
-  **Open in Google Maps** deep link.
+  **Open in Google Maps** deep link and a **Simulate movement** dev toggle.
 - **Provider match map**: the provider listing screen shows the pickup marker
   (green) and each matched recipient (navy), with an OSRM route line per match,
   and labels distances that fell back to the Haversine `estimated` value.
@@ -254,6 +301,13 @@ Copy `server/.env.example` to `server/.env` (all optional for the demo):
 | `MATCH_RESULT_LIMIT` | `5` | Matches returned (and drawn on the provider match map) |
 | `MATCH_OFFER_LIMIT` | `5` | Top matches turned into recipient offers |
 | `MATCH_WEIGHTS` | `25/25/15/20/15` | JSON overrides for `foodCompatibility`, `demand`, `quantityFit`, `roadDistance`, `timeFeasibility` |
+| `VOLUNTEER_OFFER_TIMEOUT_SEC` | `600` | How long a volunteer invitation stays open before it cascades |
+| `VOLUNTEER_OFFER_LIMIT` | `3` | Ranked carriers invited at once |
+| `VOLUNTEER_MAX_TRAVEL_MIN` | `60` | Travel time to pickup (min) that scores zero on the travel component |
+| `VOLUNTEER_WEIGHTS` | `50/30/20` | JSON overrides for `travelTime`, `availability`, `feasibility` |
+| `OTP_MAX_ATTEMPTS` | `5` | Pickup OTP attempts before the assignment is locked |
+| `OTP_HASH_ROUNDS` | `8` | bcrypt cost for the stored pickup OTP hash |
+| `ALLOW_SIMULATION` | `true` | Enable the dev “simulate movement” endpoint |
 | `GEO_TIMEOUT_MS` | `4000` | OSRM/Nominatim timeout |
 | `SAFETY_RULES_PATH` | `server/config/safetyRules.json` | Alternate validation rules file |
 
@@ -273,8 +327,9 @@ server/
       geo.js              geocode / reverseGeocode / routeInfo (+ fallback)
       validate.js         rule-based listing validation (loads config)
       matching.js         deterministic scoring (+ optional LLM rewrite)
-      workflow.js         state machine, status_events, simulated notifications
+      workflow.js         state machine, status_events, simulated notifications, OTP issue/verify
       listings.js         shared listing/offer/assignment logic and serialisation
+      volunteerAssignment.js  carrier ranking, invitations, expiry/cascade, OTP reveal
       profiles.js         per-role profile lookups (users <-> profile tables)
       access.js           contact-visibility rules
   config/
@@ -285,7 +340,7 @@ client/
     components/           Layout, MapPicker, MapView, TaskMap, LocationSharer, ui
     pages/                Landing, Login, ProviderDashboard, ListingForm/Detail,
                           RecipientInbox/Tasks, VolunteerAvailable/Tasks, TaskDetail,
-                          Impact, Notifications, Carriers
+                          VerifyPickup, Impact, Notifications, Carriers
     lib/                  api, auth, format, mapConfig, leafletIcons
 ```
 
@@ -297,7 +352,10 @@ Contact details (phone/email) are returned **only** to authorized participants
 of a donation: the owning provider, the accepted recipient, or the assigned
 volunteer/delivery partner. Everyone else sees `contactVisible: false`. A
 listing may carry its own pickup `contact_name`/`contact_phone`; those are gated
-the same way and never exposed on the public listing object.
+the same way and never exposed on the public listing object. A volunteer who has
+only been **invited** (not yet accepted) is not a participant, so they see the
+pickup address but no contact details. Pickup OTP hashes and the plain OTP are
+likewise never serialized to carriers.
 
 ---
 

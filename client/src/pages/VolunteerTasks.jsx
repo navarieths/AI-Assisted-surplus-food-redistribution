@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { KeyRound } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { EmptyState, Spinner, StatusBadge } from '../components/ui.jsx';
 import { fmtDateTime, num } from '../lib/format.js';
@@ -29,9 +30,19 @@ export default function VolunteerTasks() {
               <div className="mt-1 text-xs text-navy-600">
                 Pickup: {t.listing?.address} · Drop: {t.recipient?.org_name || t.recipient?.name}
               </div>
-              <div className="text-xs text-navy-600">{num(t.listing?.quantity_kg)} kg · by {fmtDateTime(t.listing?.pickup_deadline)}</div>
+              <div className="text-xs text-navy-600">
+                {num(t.listing?.quantity_kg)} kg · by {fmtDateTime(t.listing?.pickup_deadline)}
+                {t.pickup_verified_at ? ` · picked up ${fmtDateTime(t.pickup_verified_at)}` : ''}
+              </div>
             </div>
-            <span className="chip bg-navy-50 text-navy-700">#{t.id}</span>
+            <div className="flex items-center gap-2">
+              {!t.pickup_verified_at && t.status !== 'DELIVERED' && (
+                <span className="chip bg-amber-100 text-amber-700">
+                  <KeyRound className="mr-1 h-3 w-3" /> Verify pickup
+                </span>
+              )}
+              <span className="chip bg-navy-50 text-navy-700">#{t.id}</span>
+            </div>
           </div>
         </Link>
       ))}

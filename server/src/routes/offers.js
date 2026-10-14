@@ -10,6 +10,7 @@ import {
 } from '../services/listings.js';
 import { maybeEnhanceExplanation } from '../services/matching.js';
 import { withProfile } from '../services/profiles.js';
+import { inviteVolunteers } from '../services/volunteerAssignment.js';
 
 const router = Router();
 router.use(authRequired);
@@ -33,12 +34,16 @@ router.get('/', requireRole('recipient'), (req, res) => {
   res.json({ offers });
 });
 
-router.post('/:id/accept', requireRole('recipient'), (req, res, next) => {
+router.post('/:id/accept', requireRole('recipient'), async (req, res, next) => {
   try {
     const offer = q.get(`SELECT * FROM offers WHERE id = ?`, [req.params.id]);
     if (!offer) return res.status(404).json({ error: 'Offer not found' });
     const { assignment } = acceptOffer(offer, req.user, req.user);
-    res.json({ assignment: serializeAssignment(assignment, req.user) });
+    const invitations = await inviteVolunteers(assignment, req.user);
+    res.json({
+      assignment: serializeAssignment(assignment, req.user),
+      invitedVolunteers: invitations.filter((invitation) => invitation.status === 'OFFERED').length,
+    });
   } catch (err) {
     next(err);
   }

@@ -42,11 +42,7 @@ router.get('/', (req, res) => {
     clauses.push('provider_id = ?');
     params.push(req.user.id);
   } else if (req.user.role === 'recipient') {
-    // recipients only see listings offered/accepted to them
-    clauses.push(
-      `id IN (SELECT listing_id FROM offers WHERE recipient_id = ? AND status IN ('OFFERED','ACCEPTED'))`
-    );
-    params.push(req.user.id);
+    clauses.push(`status IN ('ELIGIBLE','OFFERED','NO_MATCH','AT_RISK')`);
   }
   if (status) {
     clauses.push('status = ?');

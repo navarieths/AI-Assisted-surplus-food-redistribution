@@ -1,6 +1,7 @@
 import { Link, Navigate } from 'react-router-dom';
 import { ArrowRight, CheckCircle2, Leaf, MapPin, Route, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
+import { getRoleHome } from '../lib/roles.js';
 import { SafetyDisclaimer } from '../components/ui.jsx';
 
 const STEPS = [
@@ -30,8 +31,7 @@ export default function Landing() {
   const { user, loading } = useAuth();
 
   if (user) {
-    const dest = user.role === 'provider' ? '/provider' : user.role === 'recipient' ? '/inbox' : '/volunteer';
-    return <Navigate to={dest} replace />;
+    return <Navigate to={getRoleHome(user.role)} replace />;
   }
   if (loading) return null;
 
@@ -42,9 +42,8 @@ export default function Landing() {
           <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand">🍃</span> Surplus
         </div>
         <div className="flex items-center gap-2">
-          <Link to="/login" className="btn-ghost">Log in</Link>
-          <Link to="/login?mode=register" className="btn-green">
-            Get started <ArrowRight className="h-4 w-4" />
+          <Link to="/login" className="btn-green">
+            Sign in <ArrowRight className="h-4 w-4" />
           </Link>
         </div>
       </header>
@@ -61,8 +60,8 @@ export default function Landing() {
               carriers — with rule-based checks, deterministic matching and live delivery tracking.
             </p>
             <div className="mt-6 flex flex-wrap gap-3">
-              <Link to="/login?mode=register" className="btn-green">
-                Create an account <ArrowRight className="h-4 w-4" />
+              <Link to="/login" className="btn-green">
+                Sign in <ArrowRight className="h-4 w-4" />
               </Link>
               <Link to="/login" className="rounded-lg border border-white/30 px-4 py-2 text-sm font-semibold text-white hover:bg-white/10">
                 Try a demo account
